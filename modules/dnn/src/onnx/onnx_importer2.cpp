@@ -392,7 +392,7 @@ inline void replaceLayerParam(LayerParams& layerParams, const String& oldKey, co
     {
         const opencv_onnx::TensorProto& tensor_proto = graph_proto.initializer(i);
         dumpTensorProto(i, tensor_proto, "initializer");
-        Mat mat = getMatFromTensor2(tensor_proto);
+        Mat mat = getMatFromTensor2(tensor_proto, onnxBasePath);
         releaseONNXTensor(const_cast<opencv_onnx::TensorProto&>(tensor_proto));  // drop already loaded data
 
         if (DNN_DIAGNOSTICS_RUN && mat.empty())
@@ -514,7 +514,7 @@ LayerParams ONNXImporter2::getLayerParams(const opencv_onnx::NodeProto& node_pro
             else if (attribute_proto.has_t())
             {
                 opencv_onnx::TensorProto tensor = attribute_proto.t();
-                Mat blob = getMatFromTensor2(tensor);
+                Mat blob = getMatFromTensor2(tensor, onnxBasePath);
                 lp.blobs.push_back(blob);
                 lp.set("original_dims_of_mat", tensor.dims_size());
             }
