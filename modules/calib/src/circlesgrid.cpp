@@ -1207,42 +1207,88 @@ void CirclesGridFinder::computeRNG(Graph &rng, std::vector<cv::Point2f> &vectors
   rng = Graph(keypoints.size());
   vectors.clear();
 
-  //TODO: use more fast algorithm instead of naive N^3
-  for (size_t i = 0; i < keypoints.size(); i++)
+  const size_t n = keypoints.size();
+  if (n < 2)
+    return;
+
+  // RNG is a subgraph of the Delaunay triangulation, so we only need to test
+  // Delaunay edges as candidates. This brings the complexity from O(N^3) down
+  // to O(N^2) in the worst case, and much better in practice for regular grids
+  // where Delaunay edges (~3N) are almost all RNG edges anyway.
+
+  float minX = keypoints[0].x, minY = keypoints[0].y;
+  float maxX = minX, maxY = minY;
+  for (size_t i = 1; i < n; i++)
   {
-    for (size_t j = 0; j < keypoints.size(); j++)
+    minX = std::min(minX, keypoints[i].x);
+    minY = std::min(minY, keypoints[i].y);
+    maxX = std::max(maxX, keypoints[i].x);
+    maxY = std::max(maxY, keypoints[i].y);
+  }
+
+  // Subdiv2D requires a rect that strictly contains all points.
+  const float margin = 1.f;
+  Rect2f rect(minX - margin, minY - margin,
+              (maxX - minX) + 2*margin,
+              (maxY - minY) + 2*margin);
+  Subdiv2D subdiv(rect);
+  subdiv.insert(std::vector<Point2f>(keypoints.begin(), keypoints.end()));
+
+  // Map coordinates back to keypoint indices. Subdiv2D stores and returns the
+  // exact float values we inserted, so direct comparison is safe here.
+  std::map<std::pair<float, float>, size_t> ptToIdx;
+  for (size_t i = 0; i < n; i++)
+    ptToIdx[{keypoints[i].x, keypoints[i].y}] = i;
+
+  std::vector<Vec4f> edgeList;
+  subdiv.getEdgeList(edgeList);
+
+  for (const Vec4f& e : edgeList)
+  {
+    auto it1 = ptToIdx.find({e[0], e[1]});
+    auto it2 = ptToIdx.find({e[2], e[3]});
+    // Edges involving the virtual bounding-rect vertices won't be in ptToIdx.
+    if (it1 == ptToIdx.end() || it2 == ptToIdx.end())
+      continue;
+
+    size_t i = it1->second;
+    size_t j = it2->second;
+    // getEdgeList gives each undirected edge once per stored quad-edge direction.
+    // Guard with i < j so we process each pair exactly once.
+    if (i >= j)
+      continue;
+
+    Point2f vec = keypoints[i] - keypoints[j];
+    double distSq = (double)vec.x*vec.x + (double)vec.y*vec.y;
+
+    bool isRNG = true;
+    for (size_t k = 0; k < n; k++)
     {
-      if (i == j)
+      if (k == i || k == j)
         continue;
-
-      Point2f vec = keypoints[i] - keypoints[j];
-      double dist = norm(vec);
-
-      bool isNeighbors = true;
-      for (size_t k = 0; k < keypoints.size(); k++)
+      Point2f d1 = keypoints[i] - keypoints[k];
+      Point2f d2 = keypoints[j] - keypoints[k];
+      double d1Sq = (double)d1.x*d1.x + (double)d1.y*d1.y;
+      double d2Sq = (double)d2.x*d2.x + (double)d2.y*d2.y;
+      if (d1Sq < distSq && d2Sq < distSq)
       {
-        if (k == i || k == j)
-          continue;
-
-        double dist1 = norm(keypoints[i] - keypoints[k]);
-        double dist2 = norm(keypoints[j] - keypoints[k]);
-        if (dist1 < dist && dist2 < dist)
-        {
-          isNeighbors = false;
-          break;
-        }
+        isRNG = false;
+        break;
       }
+    }
 
-      if (isNeighbors)
+    if (isRNG)
+    {
+      rng.addEdge(i, j);
+      // Push both directions; findBasis needs the full set to cluster into
+      // the 4 groups (two grid axes and their negatives) via k-means.
+      vectors.push_back(keypoints[i] - keypoints[j]);
+      vectors.push_back(keypoints[j] - keypoints[i]);
+      if (drawImage != 0)
       {
-        rng.addEdge(i, j);
-        vectors.push_back(keypoints[i] - keypoints[j]);
-        if (drawImage != 0)
-        {
-          line(*drawImage, keypoints[i], keypoints[j], Scalar(255, 0, 0), 2);
-          circle(*drawImage, keypoints[i], 3, Scalar(0, 0, 255), -1);
-          circle(*drawImage, keypoints[j], 3, Scalar(0, 0, 255), -1);
-        }
+        line(*drawImage, keypoints[i], keypoints[j], Scalar(255, 0, 0), 2);
+        circle(*drawImage, keypoints[i], 3, Scalar(0, 0, 255), -1);
+        circle(*drawImage, keypoints[j], 3, Scalar(0, 0, 255), -1);
       }
     }
   }

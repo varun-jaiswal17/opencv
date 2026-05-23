@@ -849,6 +849,103 @@ TEST(Calib3d_RotatedCirclesPatternDetector, issue_24964)
     EXPECT_LE(error, precise_success_error_level);
 }
 
+// Generate a perfect W x H symmetric circle grid at the given spacing.
+// Points are returned in shuffled order so the detector can't rely on input ordering.
+static std::vector<Point2f> makeSyntheticSymmetricGrid(int cols, int rows, float spacing, uint64 seed = 42)
+{
+    std::vector<Point2f> pts;
+    pts.reserve(cols * rows);
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            pts.push_back(Point2f(c * spacing, r * spacing));
+
+    cv::RNG rng(seed);
+    for (int k = (int)pts.size() - 1; k > 0; k--)
+        std::swap(pts[k], pts[rng.uniform(0, k + 1)]);
+
+    return pts;
+}
+
+// Generate an asymmetric circle grid. Even rows start at x=0, odd rows are offset by spacing/2.
+static std::vector<Point2f> makeSyntheticAsymmetricGrid(int cols, int rows, float spacing, uint64 seed = 42)
+{
+    std::vector<Point2f> pts;
+    pts.reserve(cols * rows);
+    for (int r = 0; r < rows; r++)
+        for (int c = 0; c < cols; c++)
+            pts.push_back(Point2f(c * spacing + (r % 2) * spacing * 0.5f, r * spacing * 0.5f));
+
+    cv::RNG rng(seed);
+    for (int k = (int)pts.size() - 1; k > 0; k--)
+        std::swap(pts[k], pts[rng.uniform(0, k + 1)]);
+
+    return pts;
+}
+
+TEST(Calib3d_CirclesGrid_RNG, synthetic_symmetric)
+{
+    // Verify that findCirclesGrid correctly detects synthetic perfect symmetric grids of
+    // various sizes. This exercises the computeRNG path (Delaunay-based) end-to-end.
+    const float spacing = 30.f;
+
+    struct GridCase { int cols, rows; };
+    GridCase cases[] = { {4, 4}, {6, 5}, {8, 6}, {10, 8} };
+
+    for (const GridCase& gc : cases)
+    {
+        std::vector<Point2f> pts = makeSyntheticSymmetricGrid(gc.cols, gc.rows, spacing);
+
+        std::vector<Point2f> centers;
+        bool found = findCirclesGrid(Mat(pts), Size(gc.cols, gc.rows), centers,
+                                     CALIB_CB_SYMMETRIC_GRID, Ptr<FeatureDetector>());
+
+        EXPECT_TRUE(found) << "Symmetric grid " << gc.cols << "x" << gc.rows << " not detected";
+        if (!found)
+            continue;
+
+        ASSERT_EQ((int)centers.size(), gc.cols * gc.rows);
+        for (const Point2f& c : centers)
+        {
+            bool matched = false;
+            for (const Point2f& p : pts)
+                if (cv::norm(c - p) < 1.f) { matched = true; break; }
+            EXPECT_TRUE(matched) << "Detected center " << c << " does not match any input point "
+                                 << "for grid " << gc.cols << "x" << gc.rows;
+        }
+    }
+}
+
+TEST(Calib3d_CirclesGrid_RNG, synthetic_asymmetric)
+{
+    const float spacing = 30.f;
+
+    struct GridCase { int cols, rows; };
+    GridCase cases[] = { {4, 6}, {5, 8} };
+
+    for (const GridCase& gc : cases)
+    {
+        std::vector<Point2f> pts = makeSyntheticAsymmetricGrid(gc.cols, gc.rows, spacing);
+
+        std::vector<Point2f> centers;
+        bool found = findCirclesGrid(Mat(pts), Size(gc.cols, gc.rows), centers,
+                                     CALIB_CB_ASYMMETRIC_GRID, Ptr<FeatureDetector>());
+
+        EXPECT_TRUE(found) << "Asymmetric grid " << gc.cols << "x" << gc.rows << " not detected";
+        if (!found)
+            continue;
+
+        ASSERT_EQ((int)centers.size(), gc.cols * gc.rows);
+        for (const Point2f& c : centers)
+        {
+            bool matched = false;
+            for (const Point2f& p : pts)
+                if (cv::norm(c - p) < 1.f) { matched = true; break; }
+            EXPECT_TRUE(matched) << "Detected center " << c << " does not match any input point "
+                                 << "for grid " << gc.cols << "x" << gc.rows;
+        }
+    }
+}
+
 TEST(Calib3d_CornerOrdering, issue_26830) {
     const cv::String dataDir = string(TS::ptr()->get_data_path()) + "cv/cameracalibration/";
     const cv::Mat image = cv::imread(dataDir + "checkerboard_marker_white.png");
