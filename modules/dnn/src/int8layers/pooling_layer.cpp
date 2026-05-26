@@ -287,9 +287,8 @@ public:
     virtual Ptr<BackendNode> initNgraph(const std::vector<Ptr<BackendWrapper> > &inputs,
                                         const std::vector<Ptr<BackendNode> >& nodes) CV_OVERRIDE
     {
-        auto input = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
-
-        input = ngraphDequantize(input, input_sc, input_zp);
+        auto raw_input = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
+        auto input = ngraphDequantize(raw_input, input_sc, input_zp);
 
         ov::op::PadType pad_type = ov::op::PadType::EXPLICIT;
         if (!padMode.empty())
@@ -308,9 +307,43 @@ public:
                         ov::Shape(pads_begin), ov::Shape(pads_end), ov::Shape(kernel_size),
                         !avePoolPaddedArea, rounding_type, pad_type);
 #else
-            pool = std::make_shared<ov::op::v1::AvgPool>(input, ov::Strides(strides),
-                        ov::Shape(pads_begin), ov::Shape(pads_end), ov::Shape(kernel_size),
-                        !avePoolPaddedArea, rounding_type, pad_type);
+            // OV < 2025.3 has no INT8 AvgPool primitive — FakeQuantize+AvgPool
+            // gets fused into an INT8 kernel that doesn't exist, crashing at
+            // compile_model time. Use ReduceMean for global pool (mathematically
+            // identical) and explicit arithmetic dequant for partial pool to
+            // prevent OV from recognizing the INT8 fusion pattern.
+            ov::Shape inpShape = input.get_shape();
+            bool isGlobal = !kernel_size.empty();
+            if (isGlobal) {
+                for (size_t i = 0; i < kernel_size.size(); i++) {
+                    if (pads_begin[i] != 0 || pads_end[i] != 0 ||
+                        kernel_size[i] != inpShape[2 + i]) {
+                        isGlobal = false;
+                        break;
+                    }
+                }
+            }
+            if (isGlobal) {
+                std::vector<int64_t> axes;
+                for (size_t i = 0; i < kernel_size.size(); i++)
+                    axes.push_back(2 + i);
+                auto reduction_axes = std::make_shared<ov::op::v0::Constant>(
+                    ov::element::i64, ov::Shape{axes.size()}, axes);
+                pool = std::make_shared<ov::op::v1::ReduceMean>(input, reduction_axes, true);
+            } else {
+                auto convert = std::make_shared<ov::op::v0::Convert>(raw_input, ov::element::f32);
+                float zp_val = static_cast<float>(input_zp);
+                float sc_val = input_sc;
+                auto zp_node = std::make_shared<ov::op::v0::Constant>(
+                    ov::element::f32, ov::Shape{1}, &zp_val);
+                auto sc_node = std::make_shared<ov::op::v0::Constant>(
+                    ov::element::f32, ov::Shape{1}, &sc_val);
+                auto sub     = std::make_shared<ov::op::v1::Subtract>(convert, zp_node);
+                auto dequant = std::make_shared<ov::op::v1::Multiply>(sub, sc_node);
+                pool = std::make_shared<ov::op::v1::AvgPool>(dequant, ov::Strides(strides),
+                            ov::Shape(pads_begin), ov::Shape(pads_end), ov::Shape(kernel_size),
+                            !avePoolPaddedArea, rounding_type, pad_type);
+            }
 #endif
         } else if (type == SUM) {
             ov::Shape inpShape = input.get_shape();
