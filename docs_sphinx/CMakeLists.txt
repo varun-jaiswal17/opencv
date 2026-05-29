@@ -186,6 +186,18 @@ endforeach()
 
 if(EXISTS "${_LEGACY_DOXYFILE}")
   set(_SPHINX_DOXYFILE "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile-xml")
+  # Contrib modules to include in Doxygen XML (for Extra Modules API reference).
+  # Override: cmake -DSPHINX_CONTRIB_API_MODULES="ml;face" ..
+  if(NOT DEFINED SPHINX_CONTRIB_API_MODULES)
+    set(SPHINX_CONTRIB_API_MODULES "ml")
+  endif()
+  set(_contrib_doxy_input "")
+  foreach(_m ${SPHINX_CONTRIB_API_MODULES})
+    if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}/${_m}/include")
+      string(APPEND _contrib_doxy_input " ${OPENCV_EXTRA_MODULES_PATH}/${_m}/include")
+    endif()
+  endforeach()
+
   file(WRITE "${_SPHINX_DOXYFILE}"
     "@INCLUDE = ${_LEGACY_DOXYFILE}\n"
     "GENERATE_HTML = NO\n"
@@ -205,16 +217,11 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     "RECURSIVE = YES\n"
     # Remove cv::traits::* from EXCLUDE_SYMBOLS so Depth<T>/Type<T>/SafeType<T>/SafeFmt<T> get XML.
     "EXCLUDE_SYMBOLS = cv::DataType<*> int void CV__* T __CV* cv::gapi::detail*\n"
-    # Expand the legacy Doxyfile's PREDEFINED list (CV_EXPORTS*, CV_EXPORTS_AS(x),
-    # CV_WRAP, CV_OUT, CV_IN_OUT, CV_PROP*, … all mapped to nothing) so those
-    # binding macros are stripped from signatures, exactly as the legacy HTML
-    # build does. Without this they leak into the C++ signatures and, worse,
-    # CV_EXPORTS_AS(name) corrupts Doxygen's parse (macro lands in <name>, args
-    # get truncated). EXPAND_ONLY_PREDEF=YES confines expansion to that list, so
-    # heavy macros like CV_CREATE_MEMBER_CHECK stay unexpanded and can't crash
-    # the parser (the reason expansion was previously disabled wholesale).
+    # Expand CV_EXPORTS*, CV_EXPORTS_AS(x), CV_WRAP, etc. to nothing so they
+    # don't leak into C++ signatures or corrupt Doxygen's parse.
     "MACRO_EXPANSION = YES\n"
     "EXPAND_ONLY_PREDEF = YES\n"
+    "INPUT +=${_contrib_doxy_input}\n"
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
   if(DOXYGEN_EXE)
@@ -253,6 +260,7 @@ set(_SPHINX_ENV
   "OPENCV_SPHINX_INPUT_ROOT=${_SPHINX_INPUT_ROOT}"
   "OPENCV_CONTRIB_ROOT=${OPENCV_EXTRA_MODULES_PATH}"
   "OPENCV_DOXYGEN_XML_DIR=${_DOXYGEN_XML_DIR}"
+  "OPENCV_CONTRIB_API_MODULES=${SPHINX_CONTRIB_API_MODULES}"
 )
 if(OPENCV_PYTHON_SIGNATURES_FILE)
   list(APPEND _SPHINX_ENV "OPENCV_PYTHON_SIGNATURES_FILE=${OPENCV_PYTHON_SIGNATURES_FILE}")
