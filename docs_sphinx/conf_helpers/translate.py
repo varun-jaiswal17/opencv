@@ -895,6 +895,7 @@ def _source_read(app, docname, source):
             or docname.startswith("py_tutorials/")
             or docname.startswith("tutorials_contrib/")
             or docname.startswith("api/")
+            or docname.startswith("extra_modules/")
             or docname == "faq"
             or docname == "citelist"
             or docname == "intro"
@@ -907,6 +908,8 @@ def _source_read(app, docname, source):
             text = text.rstrip() + "\n\n- @subpage tutorial_contrib_root\n"
         if API_MODULES and "api_root" in _ANCHOR_TO_DOC:
             text = text.rstrip() + "\n\n- @subpage api_root\n"
+        if CONTRIB_API_MODULES and "extra_modules_root" in _ANCHOR_TO_DOC:
+            text = text.rstrip() + "\n\n- @subpage extra_modules_root\n"
     out = _translate(text, docname)
     # Mark unreferenced tutorial pages :orphan: (skip master/front-matter/referenced).
     if (docname.startswith(_TUTORIAL_PREFIXES)
