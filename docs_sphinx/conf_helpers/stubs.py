@@ -1,6 +1,12 @@
-"""API-reference stub writers. Entry point: ``_generate_api_stubs``."""
+"""API-reference stub writers.
+
+Emits one Markdown stub per Doxygen group / class, mirroring the legacy
+Doxygen page layout (summary tables + per-member breathe directives).
+``_generate_api_stubs`` is the entry point the build orchestrator calls.
+Builds on the primitives in ``xml_render`` and the shared state in ``state``.
+"""
 from __future__ import annotations
-import pathlib, os as _os, shutil as _shutil, textwrap as _textwrap
+import pathlib, re, os as _os, shutil as _shutil, textwrap as _textwrap
 from .state import *
 from .xml_render import *
 from .examples import (
@@ -8,36 +14,33 @@ from .examples import (
 )
 
 
-# Drives write-if-changed and the stale-file sweep.
+# Paths written during the current `_generate_api_stubs` run. Drives both the
+# write-if-changed optimization (skip rewriting unchanged stubs so Sphinx's
+# incremental build doesn't reprocess them) and the stale-file sweep at the
+# end (anything in out_dir NOT written this run is from a removed module).
 _stub_written: set[pathlib.Path] = set()
 
 
 def _stub_write(path: pathlib.Path, content: str) -> None:
-    """Write only if changed; mark path live for this run."""
+    """Write `content` to `path` only when it differs from what's on disk, and
+    record the path as live for this run. Replaces the previous
+    wipe-and-regenerate (`shutil.rmtree`) approach, which rewrote every stub
+    each build and forced Sphinx to reprocess the whole api/ tree."""
     if not (path.is_file() and path.read_text(encoding="utf-8") == content):
         path.write_text(content, encoding="utf-8")
     _stub_written.add(path)
 
 
-def _group_by_section_header(items: list[dict]) -> list[tuple[str, list[dict]]]:
-    """Split members into contiguous runs sharing a Doxygen `@name` header."""
-    groups: list[tuple[str, list[dict]]] = []
-    for m in items:
-        hdr = m.get("section_header") or ""
-        if not groups or groups[-1][0] != hdr:
-            groups.append((hdr, []))
-        groups[-1][1].append(m)
-    return groups
-
-
 def _collect_all_group_names(node: dict) -> list[str]:
-    """Flatten group hierarchy to every group's `name`."""
+    """Flatten a group hierarchy to the list of every group's `name`."""
     return [node["name"]] + [n for c in node["children"]
                              for n in _collect_all_group_names(c)]
 
 
 def _namespaces_section(entries: list) -> list[str]:
-    """`## Namespaces` block of `@subpage` entries; `entries` is `(ns_name, anchor)`."""
+    """`## Namespaces` block listing each namespace as an `@subpage` (the
+    `_subpage_list_to_toctree` translate rule turns these into a real
+    toctree). `entries` is a list of `(ns_name, anchor)` tuples."""
     lines = ["## Namespaces", ""]
     for _ns_name, anchor in entries:
         lines.append(f"- @subpage {anchor}")
@@ -46,147 +49,39 @@ def _namespaces_section(entries: list) -> list[str]:
 
 
 def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
-                          xml_dir: pathlib.Path,
-                          ns_group_map: dict | None = None,
-                          group_info: dict | None = None) -> tuple[str, str]:
-    """Write api/namespace_<slug>.md for one namespace. Returns (anchor, fname)."""
-    import xml.etree.ElementTree as _ET
+                          xml_dir: pathlib.Path) -> tuple[str, str]:
+    """Write ``api/namespace_<slug>.md`` for one namespace. Returns
+    ``(anchor, filename)``.
+
+    The page is an index, not a second home for member detail: it lists the
+    namespace's classes and a summary table per member kind, each row linking
+    to the canonical ``#<refid>`` anchor that the owning *group* page already
+    emits. Deliberately no per-member ``(id)=`` targets here — those live on
+    the group pages, and duplicating them across docs would trip docutils'
+    "Duplicate explicit target name". Enums render inline as a code synopsis
+    (matching the group-page layout); the namespace's own prose, when any,
+    comes from breathe's ``{doxygennamespace}``."""
     slug = ns["name"].replace("::", "__")
     anchor = f"api_ns_{slug}"
     fname = f"namespace_{slug}.md"
     lines = [f"# {ns['name']} namespace {{#{anchor}}}", ""]
-
-    # Breadcrumbs: link back to the group pages that contain this namespace.
-    if ns_group_map and group_info:
-        crumbs: list[str] = []
-        for grp in sorted(ns_group_map.get(ns["name"], set())):
-            chain: list[str] = []
-            cur: str | None = grp
-            while cur and cur in group_info:
-                chain.append(cur)
-                cur = group_info[cur]["parent"]
-            chain.reverse()
-            parts = [f"[{group_info[g]['title']}]({g}.md)" for g in chain]
-            if parts:
-                crumbs.append(" » ".join(parts))
-        if crumbs:
-            lines += [" | ".join(crumbs), ""]
-
     if ns.get("brief"):
         lines += [ns["brief"], ""]
 
-    # Read member sections from patched XML (has inlined group memberdefs).
-    ns_sections: dict[str, list[dict]] = {}
-    ns_xml_path = _PATCHED_XML_DIR / f"{ns['refid']}.xml" if ns.get("refid") else None
-    if ns_xml_path and ns_xml_path.is_file():
-        try:
-            cd_ns = _ET.parse(ns_xml_path).getroot().find("compounddef")
-            if cd_ns is not None:
-                ns_pfx = ns["name"] + "::"
-                for sd in cd_ns.findall("sectiondef"):
-                    for md in sd.findall("memberdef"):
-                        kind = md.get("kind", "")
-                        section_title = dict(_MEMBERDEF_SECTIONS).get(kind)
-                        if not section_title:
-                            continue
-                        qualified = (md.findtext("qualifiedname") or "").strip() or \
-                                    (md.findtext("name") or "").strip()
-                        # Skip class methods / sub-namespace members.
-                        if qualified.startswith(ns_pfx) and "::" in qualified[len(ns_pfx):]:
-                            continue
-                        def _pt(p) -> str:
-                            t = _itertext(p.find("type"))
-                            arr = (p.findtext("array") or "").strip()
-                            return (t + arr) if arr else t
-                        enum_values = []
-                        if kind == "enum":
-                            for ev in md.findall("enumvalue"):
-                                enum_values.append({
-                                    "name":        (ev.findtext("name") or "").strip(),
-                                    "initializer": (ev.findtext("initializer") or "").strip(),
-                                    "brief":       _itertext(ev.find("briefdescription")),
-                                })
-                        ns_sections.setdefault(section_title, []).append({
-                            "id":          md.get("id", ""),
-                            "kind":        kind,
-                            "name":        (md.findtext("name") or "").strip(),
-                            "qualified":   qualified,
-                            "type":        _itertext(md.find("type")),
-                            "type_elem":   md.find("type"),
-                            "static":      md.get("static") == "yes",
-                            "args":        (md.findtext("argsstring") or "").strip(),
-                            "param_types": [_pt(p) for p in md.findall("param")],
-                            "brief":       _itertext(md.find("briefdescription")),
-                            "enum_values": enum_values,
-                            "strong":      md.get("strong", "no") == "yes",
-                        })
-        except _ET.ParseError:
-            pass
-
-    # Sub-namespaces listed in this namespace's XML.
     ns_prefix = ns["name"] + "::"
-    innernamespaces = []
-    if ns_xml_path and ns_xml_path.is_file():
-        try:
-            cd2 = _ET.parse(ns_xml_path).getroot().find("compounddef")
-            if cd2 is not None:
-                for inn in cd2.findall("innernamespace"):
-                    iname = (inn.text or "").strip()
-                    irefid = inn.get("refid", "")
-                    if iname:
-                        innernamespaces.append((iname, irefid))
-        except _ET.ParseError:
-            pass
-
-    def _ns_has_content(refid: str) -> bool:
-        f = xml_dir / f"{refid}.xml"
-        if not f.is_file():
-            return True
-        try:
-            cd3 = _ET.parse(f).getroot().find("compounddef")
-            return cd3 is not None and bool(
-                cd3.findall("sectiondef") or cd3.findall("innerclass") or
-                cd3.findall("innernamespace"))
-        except _ET.ParseError:
-            return True
-
-    nonempty_ns = [(n, r) for n, r in innernamespaces if _ns_has_content(r)]
-    if nonempty_ns:
-        lines += ["## Namespaces", "", "| Namespace |", "|---|"]
-        for iname, _ in sorted(nonempty_ns, key=lambda x: x[0].lower()):
-            short = iname[len(ns_prefix):] if iname.startswith(ns_prefix) else iname
-            islug = iname.replace("::", "__")
-            lines.append(f"| [namespace {short}](namespace_{islug}.md) |")
-        lines.append("")
-
-    # Classes directly in this namespace.
-    refid_prefix = ns["name"].replace("::", "_1_1") + "_1_1"
-    innerclasses = []
-    for kind in ("struct", "class"):
-        for xml_file in sorted(xml_dir.glob(f"{kind}{refid_prefix}*.xml")):
-            try:
-                cd2 = _ET.parse(xml_file).getroot().find("compounddef")
-                if cd2 is None:
-                    continue
-                cname = (cd2.findtext("compoundname") or "").strip()
-                # Skip classes in a sub-namespace; allow template specializations
-                # whose parameters may contain qualified names (e.g. cv::Affine3<_Tp>).
-                bare = cname[len(ns_prefix):].split("<")[0]
-                if "::" in bare:
-                    continue
-                brief = _itertext(cd2.find("briefdescription"))
-                innerclasses.append((xml_file.stem, cname, kind, brief))
-            except _ET.ParseError:
-                continue
+    innerclasses = _namespace_innerclasses(ns["name"], xml_dir)
     if innerclasses:
-        lines += ["## Classes", "", "| Name |", "|---|"]
+        lines += ["## Classes", "", "{.api-reference-table}",
+                  "| Name | Description |", "|---|---|"]
         for ic_refid, ic_name, ic_kind, ic_brief in innerclasses:
             page = _class_page_name(ic_refid)
-            short_name = ic_name[len(ns_prefix):]
-            lines.append(f"| [`{ic_kind} {short_name}`]({page}.md) |")
+            short = ic_name[len(ns_prefix):] if ic_name.startswith(ns_prefix) else ic_name
+            lines.append(
+                f"| [`{ic_kind} {short}`]({page}.md) | {_md_escape_cell(ic_brief)} |")
         lines.append("")
 
-    # Member summary tables.
+    ns_sections = _read_namespace_member_sections(ns.get("refid", ""),
+                                                  _PATCHED_XML_DIR)
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = ns_sections.get(section_title, [])
         if not items:
@@ -194,23 +89,21 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
         lines.append(f"## {section_title}")
         lines.append("")
         if section_title == "Functions":
-            lines += ["| Return | Name |", "|---|---|"]
+            lines += ["{.api-reference-table .api-function-table}",
+                      "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
-                ret_md = _type_to_md(m.get("type_elem"))
-                if not ret_md:
-                    ret_md = _md_escape_cell(m["type"]) or "&nbsp;"
-                if m.get("static"):
-                    ret_md = "static " + ret_md
+                ret = _md_escape_cell(m["type"]) or "&nbsp;"
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
-                lines.append(f"| {ret_md} | [`{label}`](#{m['id']}) |")
+                lines.append(
+                    f"| `{ret}` | [`{label}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         elif section_title in ("Typedefs", "Variables"):
+            marker = ("{.api-typedef-table}" if section_title == "Typedefs"
+                      else "{.api-reference-table}")
+            lines += [marker, "| Type | Name | Description |", "|---|---|---|"]
             for m in items:
-                lines.append("```cpp")
-                lines.append(f"typedef {m['type']} {m['name']}" if section_title == "Typedefs"
-                              else f"{m['type']} {m['name']}")
-                lines.append("```")
-                lines.append("")
-            continue
+                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                lines.append(
+                    f"| `{t}` | [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
             for m in items:
                 if m["brief"]:
@@ -220,88 +113,21 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                 lines.extend(_enum_synopsis_lines(m))
                 lines.append("```")
                 lines.append("")
-            continue
-        else:
-            lines += ["| Name | Description |", "|---|---|"]
+            continue   # already appended trailing blank
+        else:  # Macros
+            lines += ["{.api-reference-table}",
+                      "| Name | Description |", "|---|---|"]
             for m in items:
-                lines.append(f"| [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
+                lines.append(
+                    f"| [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         lines.append("")
 
-    # Detailed description or doxygennamespace fallback.
-    if not ns_sections and not innerclasses:
-        lines += ["## Detailed Description", "",
-                  f"```{{doxygennamespace}} {ns['name']}", ":project: opencv", "```", ""]
-    elif ns.get("detailed"):
+    # Namespace's own prose — emitted directly from the parsed XML text. We do
+    # NOT use a bare `{doxygennamespace}` directive: breathe would re-dump every
+    # member (duplicating the summary tables above) and register a second set of
+    # member targets. The summary rows already deep-link into the group pages.
+    if ns.get("detailed"):
         lines += ["## Detailed Description", "", ns["detailed"], ""]
-
-    # Per-member detail blocks.
-    seen_define_names: set[str] = set()
-    for kind_key, section_title in _MEMBERDEF_SECTIONS:
-        items = ns_sections.get(section_title, [])
-        if not items:
-            continue
-        if section_title == "Enumerations":
-            enum_items = [m for m in items if "<" not in (m.get("name") or "")]
-            if enum_items:
-                lines.append(f"## {_MEMBER_DETAIL_SECTION[section_title]}")
-                lines.append("")
-                for m in enum_items:
-                    qualified = m["qualified"] or m["name"]
-                    keyword = "enum class" if m.get("strong") else "enum"
-                    lines.append(f"({m['id']})=")
-                    lines.append(f"### {m['name']}")
-                    lines.append("")
-                    lines += [f"`{keyword} {qualified}`", ""]
-                    if m.get("brief"):
-                        lines += [_md_escape_cell(m["brief"]), ""]
-                    vals = m.get("enum_values") or []
-                    if vals:
-                        has_desc = any(v.get("brief") for v in vals)
-                        if has_desc:
-                            lines += ["| Enumerator | Description |", "|---|---|"]
-                        else:
-                            lines += ["| Enumerator |", "|---|"]
-                        for v in vals:
-                            scope = qualified if m.get("strong") else ns["name"]
-                            cpp_key = f"{scope}::{v['name']}"
-                            py_entries = _PY_SIGNATURES.get(cpp_key, [])
-                            py_name = py_entries[0]["name"] if py_entries else None
-                            cell = f"`{v['name']}`"
-                            if py_name:
-                                cell += f"<br>Python: `{py_name}`"
-                            if has_desc:
-                                lines.append(f"| {cell} | {_md_escape_cell(v.get('brief') or '')} |")
-                            else:
-                                lines.append(f"| {cell} |")
-                        lines.append("")
-            continue
-        directive = _MEMBER_DIRECTIVE.get(kind_key)
-        if not directive:
-            continue
-        rendered = []
-        for m in items:
-            if "<" in (m.get("name") or ""):
-                continue
-            qualified = m["qualified"] or m["name"]
-            if m["kind"] == "function":
-                spec = qualified + _function_signature(m)
-            elif m["kind"] == "define":
-                if m["name"] in seen_define_names:
-                    continue
-                seen_define_names.add(m["name"])
-                spec = m["name"]
-            else:
-                spec = qualified
-            rendered.append((spec, directive))
-        if not rendered:
-            continue
-        lines.append(f"## {_MEMBER_DETAIL_SECTION[section_title]}")
-        lines.append("")
-        for spec, dname in rendered:
-            short = spec.split("(")[0].split("::")[-1]
-            suffix = "()" if dname == "doxygenfunction" else ""
-            lines += [f"### {short}{suffix}", "",
-                      f"```{{{dname}}} {spec}", ":project: opencv", "```", ""]
 
     _stub_write(out_dir / fname, "\n".join(lines) + "\n")
     return anchor, fname
@@ -309,34 +135,45 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
 
 def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     classes_seen: dict, ns_map: dict | None = None) -> None:
-    """Write one .md per group node, recursing into children.
+    """Write one .md per group node. Recurses into children.
 
-    Parent groups → @subpage index pages; leaf groups → summary tables + detail
-    blocks. Inner classes populate `classes_seen` for later page emission."""
+    Parent groups (have <innergroup> children) → navigation index pages with
+    @subpage toctrees. Leaf groups → Doxygen-style summary tables (Classes /
+    Typedefs / Enumerations / Functions / Variables / Macros) at top, then
+    a per-member detail block per kind (one breathe directive per member, not
+    the recursive `{doxygengroup}` which inlines every nested class). Inner
+    classes get their own pages — emitted later by `_generate_api_stubs` from
+    `classes_seen`, which this fn populates."""
     name = node["name"]
     title = node["title"]
     out = out_dir / f"{name}.md"
 
-    lines = [f"# {title} {{#api_{name}}}", ""]
-
-    # Subgroup index: emit the @subpage Topics list first (the
-    # `_subpage_list_to_toctree` rule turns it into a real toctree), then fall
-    # through to this group's OWN members below — a group can have both, which
-    # matches the live Doxygen group-page layout. Children are recursed at the end.
     if node["children"]:
+        # Navigation index page — list children as @subpage entries; the
+        # existing _subpage_list_to_toctree rule converts them to a real
+        # toctree at translate time.
+        lines = [f"# {title} {{#api_{name}}}", ""]
+        if node["detailed"]:
+            lines += [node["detailed"], ""]
+        if ns_map and ns_map.get(name):
+            lines += _namespaces_section(ns_map[name])
         lines += ["## Topics", ""]
         for child in node["children"]:
             lines.append(f"- @subpage api_{child['name']}")
-        lines.append("")
+        _stub_write(out, "\n".join(lines) + "\n")
+        for child in node["children"]:
+            _write_api_stub(child, out_dir, classes_seen, ns_map)
+        return
 
-    # Detailed Description heading — shown even when empty (ayush's layout).
+    # ---- Leaf page ----------------------------------------------------------
+    lines = [f"# {title} {{#api_{name}}}", ""]
     if node["detailed"]:
         lines += ["## Detailed Description", "", node["detailed"], ""]
-    elif node["innerclasses"] or node["sections"] or node["children"]:
-        lines += ["## Detailed Description", ""]
     if ns_map and ns_map.get(name):
         lines += _namespaces_section(ns_map[name])
 
+    # Classes summary table — link to the per-class page that
+    # `_generate_api_stubs` emits (one .md per refid, deduped across groups).
     if node["innerclasses"]:
         lines += ["## Classes", "", "{.api-reference-table}",
                   "| Name | Description |", "|---|---|"]
@@ -347,7 +184,11 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             lines.append(f"| {link} | {_md_escape_cell(c['brief'])} |")
         lines.append("")
 
-    # Class members listed in group sections render on the class page.
+    # Build a fast lookup of class qualified names known so far — used to
+    # detect when a group's "Functions"/"Variables" sectiondef is actually
+    # listing a class member (Doxygen groups span class boundaries). Such
+    # members get rendered on the class page, not as standalone breathe
+    # directives.
     class_qualifieds = {c.get("qualified") for c in classes_seen.values()
                         if c.get("qualified")}
 
@@ -359,11 +200,18 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         return parent in class_qualifieds
 
     def _is_template_spec(m: dict) -> bool:
-        # breathe's C++ parser rejects `<…>` names; skip detail block.
+        # Explicit template specializations carry `<…>` in the name (Doxygen
+        # stores `cv::saturate_cast< unsigned >`). breathe's C++ parser
+        # rejects this as a function-name argument, so we can't emit a
+        # `doxygenfunction` directive for them — the summary table still
+        # lists them; only the per-member detail block is skipped.
         return "<" in (m.get("name") or "")
 
 
-    # Class members lack an in-page anchor; link to the class page.
+    # Section summary tables in Doxygen's order. For class-member items the
+    # in-page anchor breathe would have emitted doesn't exist (we skip the
+    # per-member directive below) — point the link at the parent class page
+    # instead so the table stays clickable.
     def _member_anchor_link(m: dict, label: str) -> str:
         if _is_class_member(m):
             q = m["qualified"]
@@ -373,238 +221,83 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                     return f"[`{label}`]({_class_page_name(c['refid'])}.md)"
         return f"[`{label}`](#{m['id']})"
 
-    # Renders the summary table (or enum synopsis) for one member kind given a
-    # list of members — used both for the standard per-kind sections and for
-    # the @name-group sections appended afterwards. Returns markdown lines
-    # (no `## heading`); enum output already carries its own trailing blanks.
-    _rich_return = (name == "core_basic")
-
-    def _summary_block(section_title: str, members: list) -> list[str]:
-        out: list[str] = []
-        if section_title == "Functions":
-            out += ["{.api-reference-table .api-function-table}",
-                    "| Return | Name | Description |", "|---|---|---|"]
-            for m in members:
-                ret_type = _md_escape_cell(m["type"]) or "&nbsp;"
-                label = f"{m['name']}{_md_escape_cell(m['args'])}"
-                sig_link = _member_anchor_link(m, label)
-                if _rich_return:
-                    storage = "static " if m.get("static") else ""
-                    if m.get("template"):
-                        ret = f"`{m['template']}`<br>`{storage}{ret_type}`"
-                    else:
-                        ret = f"`{storage}{ret_type}`"
-                else:
-                    ret = f"`{ret_type}`"
-                out.append(f"| {ret} | {sig_link} | {_md_escape_cell(m['brief'])} |")
-        elif section_title == "Typedefs":
-            # Type cell as a code span so steps 8b/8g linkify its tokens.
-            out += ["{.api-typedef-table}",
-                    "| Type | Name | Description |", "|---|---|---|"]
-            for m in members:
-                t = _md_escape_cell(m["type"]) or "&nbsp;"
-                name_link = _member_anchor_link(m, f"cv::{m['name']}")
-                out.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
-        elif section_title == "Variables":
-            out += ["{.api-reference-table}",
-                    "| Type | Name | Description |", "|---|---|---|"]
-            for m in members:
-                t = _md_escape_cell(m["type"]) or "&nbsp;"
-                name_link = _member_anchor_link(m, m["name"])
-                out.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
-        elif section_title == "Enumerations":
-            # core_basic: clickable HTML synopsis + detail link.
-            _enum_more_link = (name == "core_basic")
-            _clickable_synopsis = (name == "core_basic")
-            import html as _html_mod
-            for m in members:
-                _more = ""
-                if _enum_more_link:
-                    # Target the detail block's heading slug.
-                    _more = f"[View details](#{m['name'].lower()})"
-                if _clickable_synopsis:
-                    _qual = m["qualified"] or m["name"]
-                    _is_strong = bool(m.get("strong"))
-                    _keyword = "enum struct" if _is_strong else "enum"
-                    # Enumerator name prefix (scope).
-                    if _is_strong:
-                        _val_prefix = _qual + "::"
-                    elif "::" in _qual:
-                        _val_prefix = _qual.rsplit("::", 1)[0] + "::"
-                    else:
-                        _val_prefix = ""
-                    _href = f"#{m['name'].lower()}"
-                    # Encode `::` so translate's cv-linkifier skips it.
-                    def _safe(s: str) -> str:
-                        return _html_mod.escape(s).replace("::", "&#58;&#58;")
-                    out.append(
-                        '<div class="highlight-cpp notranslate '
-                        'opencv-enum-clickable"><div class="highlight"><pre>'
-                    )
-                    out.append(
-                        f'<span class="k">{_html_mod.escape(_keyword)}</span> '
-                        f'<a class="reference internal" href="{_href}">'
-                        f'<span class="n">{_safe(_qual)}</span></a> '
-                        f'<span class="p">{{</span>'
-                    )
-                    _vals = m.get("enum_values") or []
-                    for _i, _v in enumerate(_vals):
-                        _comma = ('<span class="p">,</span>'
-                                  if _i < len(_vals) - 1 else '')
-                        _init = (' ' + _html_mod.escape(_v["initializer"])
-                                 if _v.get("initializer") else '')
-                        _full = _val_prefix + _v["name"]
-                        out.append(
-                            f'    <a class="reference internal" href="{_href}">'
-                            f'<span class="n">{_safe(_full)}</span></a>'
-                            f'{_init}{_comma}'
-                        )
-                    out.append('<span class="p">}</span></pre></div></div>')
-                    # Blank line closes the raw-HTML block (CommonMark rule 7).
-                    out.append("")
-                else:
-                    out.append("```cpp")
-                    out.extend(_enum_synopsis_lines(m))
-                    out.append("```")
-                if m["brief"]:
-                    line = _md_escape_cell(m["brief"])
-                    if _more:
-                        line += f" {_more}"
-                    out.append(line)
-                    out.append("")
-                elif _more:
-                    out.append(_more)
-                    out.append("")
-        else:  # Macros
-            out += ["{.api-reference-table}", "| Name | Description |", "|---|---|"]
-            for m in members:
-                name_link = _member_anchor_link(m, m["name"])
-                out.append(f"| {name_link} | {_md_escape_cell(m['brief'])} |")
-        return out
-
-    # Standard per-kind summary sections list only the *ungrouped* members (no
-    # Doxygen `@name` header). Members that DO carry an `@name` header — e.g.
-    # the "Shorter aliases for the most popular specializations of Vec<T,n>"
-    # group — are pulled out and rendered as their own `##` sections AFTER the
-    # standard sections (per the requested layout: typedefs, then functions,
-    # then each named group with its members).
-    _named_groups: list[tuple[str, str, list]] = []   # (header, section_title, members)
     for _, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
         if not items:
             continue
-        ungrouped = [m for m in items if not (m.get("section_header") or "")]
-        for _hdr, _members in _group_by_section_header(
-                [m for m in items if (m.get("section_header") or "")]):
-            _named_groups.append((_hdr, section_title, _members))
-        if ungrouped:
-            lines.append(f"## {section_title}")
-            lines.append("")
-            lines += _summary_block(section_title, ungrouped)
-            lines.append("")
-    for _hdr, section_title, _members in _named_groups:
-        lines.append(f"## {_hdr}")
+        lines.append(f"## {section_title}")
         lines.append("")
-        lines += _summary_block(section_title, _members)
+        if section_title == "Functions":
+            lines += ["{.api-reference-table .api-function-table}",
+                      "| Return | Name | Description |", "|---|---|---|"]
+            for m in items:
+                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                label = f"{m['name']}{_md_escape_cell(m['args'])}"
+                sig_link = _member_anchor_link(m, label)
+                lines.append(
+                    f"| `{ret}` | {sig_link} | {_md_escape_cell(m['brief'])} |")
+        elif section_title in ("Typedefs", "Variables"):
+            # Typedefs get their own table style; variables reuse the generic one.
+            marker = ("{.api-typedef-table}" if section_title == "Typedefs"
+                      else "{.api-reference-table}")
+            lines += [marker, "| Type | Name | Description |", "|---|---|---|"]
+            for m in items:
+                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                name_link = _member_anchor_link(m, m["name"])
+                lines.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
+        elif section_title == "Enumerations":
+            # Code-style synopsis (Doxygen layout) instead of name/desc table.
+            # Both summary and detail-block representations would duplicate
+            # the same content — we only emit the synopsis here, and skip
+            # enums in the detail-block loop below.
+            for m in items:
+                if m["brief"]:
+                    lines.append(_md_escape_cell(m["brief"]))
+                    lines.append("")
+                lines.append("```cpp")
+                lines.extend(_enum_synopsis_lines(m))
+                lines.append("```")
+                lines.append("")
+            continue   # already appended trailing blank
+        else:  # Macros
+            lines += ["{.api-reference-table}",
+                      "| Name | Description |", "|---|---|"]
+            for m in items:
+                name_link = _member_anchor_link(m, m["name"])
+                lines.append(f"| {name_link} | {_md_escape_cell(m['brief'])} |")
         lines.append("")
 
-    # Detail blocks via `_render_member_detail` (breathe chokes); macros keep
-    # `{doxygendefine}`; enum detail is hand-rolled (core_basic only).
+    # Per-member detail blocks. Functions / typedefs / variables are rendered
+    # from the Doxygen XML by `_render_member_detail` (NOT breathe): breathe's
+    # overload resolver is unreliable for these — template-class members,
+    # template-vs-non-template overload sets, and signatures carrying OpenCV
+    # macros (`CV_OUT Point *`) all produce "Cannot find" / "Unable to resolve"
+    # warnings. Macros keep breathe's `{doxygendefine}` (reliable, deduped by
+    # name). Enums are rendered as a code synopsis in the summary section above.
+    # Class members and template specializations are skipped here — see `_is_*`.
     seen_define_names: set[str] = set()
     for kind_key, section_title in _MEMBERDEF_SECTIONS:
         items = node["sections"].get(section_title, [])
-        if not items:
+        if not items or kind_key == "enum":
             continue
-        # Enum detail: core_basic only.
-        if kind_key == "enum" and name != "core_basic":
-            continue
-        # core_basic funcs: count overloads first for `[i/n]` headings.
-        _core_basic_funcs = (name == "core_basic" and kind_key == "function")
-        _ov_total: dict[str, int] = {}
-        _ov_idx: dict[str, int] = {}
-        _slug_seen: set[str] = set()
-        if _core_basic_funcs:
-            for m in items:
-                if _is_class_member(m) or _is_template_spec(m):
-                    continue
-                _ov_total[m["name"]] = _ov_total.get(m["name"], 0) + 1
         blocks: list[list[str]] = []
         for m in items:
             # Class members render on their own class page; skip on the group.
             if kind_key in ("function", "variable") and _is_class_member(m):
                 continue
-            # Template specializations carry `<…>`; summary table still lists them.
+            # Explicit template specializations (`saturate_cast< unsigned >`)
+            # carry `<…>` in the name — the summary table still lists them.
             if _is_template_spec(m):
-                continue
-            if _core_basic_funcs:
-                short = m["name"]
-                _ov_idx[short] = _ov_idx.get(short, 0) + 1
-                slug = _func_slug(short)
-                emit_anchor = slug not in _slug_seen
-                _slug_seen.add(slug)
-                blocks.append(_render_core_basic_func(
-                    m, _ov_idx[short], _ov_total.get(short, 1), emit_anchor))
-                continue
-            if kind_key == "enum":
-                # Hand-rolled (breathe's {doxygenenum} drops initializers/briefs).
-                _qual = m["qualified"] or m["name"]
-                _eid = _sphinx_cpp_v4_id(_qual)
-                _is_strong = bool(m.get("strong"))
-                _keyword = "enum class" if _is_strong else "enum"
-                _enum_href = f"#{m['name'].lower()}"
-                # Encode `::` so translate's cv-linkifier skips it (avoids a
-                # nested off-site anchor stealing the click).
-                _qual_safe = _qual.replace("::", "&#58;&#58;")
-                # Signature: full cv::Name as one clickable anchor.
-                blk: list[str] = [
-                    f"({_eid})=",
-                    f"### {m['name']}",
-                    "",
-                    f'<code class="docutils literal notranslate opencv-enum-sig">'
-                    f'{_keyword} <a class="reference internal" '
-                    f'href="{_enum_href}">{_qual_safe}</a></code>',
-                    "",
-                ]
-                # #include line, linkified to the Doxygen file page.
-                if m.get("include_file"):
-                    _ipath = m["include_file"]
-                    _ifile = _FILE_URL.get(_ipath)
-                    if _ifile:
-                        _href = f"../../../doc/doxygen/html/{_ifile}"
-                        blk += [
-                            f'<code class="docutils literal notranslate">'
-                            f'#include &lt;<a class="reference external '
-                            f'opencv-include-link" '
-                            f'href="{_href}">{_ipath}</a>&gt;</code>',
-                            "",
-                        ]
-                    else:
-                        blk += [f"`#include <{_ipath}>`", ""]
-                if m.get("brief"):
-                    blk += [m["brief"], ""]
-                if m.get("detailed"):
-                    blk += [m["detailed"], ""]
-                _vals = m.get("enum_values") or []
-                if _vals:
-                    blk += ["**Enumerator:**", "", "| | |", "|---|---|"]
-                    for _v in _vals:
-                        _nm = _v["name"]
-                        _vbrief = (_v.get("brief") or "").replace("|", "\\|").replace("\n", " ")
-                        # Name chip + Python binding (initializer omitted as noise).
-                        _cell = f"`{_nm}`"
-                        _py = _python_enum_name(_qual, _nm, _is_strong)
-                        if _py:
-                            _cell = f"{_cell}<br>Python: `{_py}`"
-                        blk.append(f"| {_cell} | {_vbrief} |")
-                    blk.append("")
-                blocks.append(blk)
                 continue
             if kind_key == "define":
                 # Macros aren't namespaced; dedupe arity-overloaded ones.
                 if m["name"] in seen_define_names:
                     continue
                 seen_define_names.add(m["name"])
-                # No `(id)=`: {doxygendefine} already registers the target.
+                # No `(id)=` anchor here: breathe's {doxygendefine} already
+                # registers the Doxygen refid as a target, and adding our own
+                # would collide ("Duplicate explicit target name"). The summary
+                # table's `#refid` link resolves to breathe's target.
                 blocks.append([
                     f"```{{doxygendefine}} {m['name']}",
                     ":project: opencv",
@@ -621,7 +314,8 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         for b in blocks:
             lines += b
 
-    # Hidden toctree registers per-class pages in the sidebar.
+    # Hidden toctree for per-class pages — needed so Sphinx knows these
+    # files exist and so the left sidebar lists them under this group.
     if node["innerclasses"]:
         lines += ["```{toctree}", ":hidden:", ":maxdepth: 1", ""]
         for c in node["innerclasses"]:
@@ -629,12 +323,10 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
         lines += ["```", ""]
 
     _stub_write(out, "\n".join(lines) + "\n")
-    # Subgroup pages: recurse (no-op for leaf groups).
-    for child in node["children"]:
-        _write_api_stub(child, out_dir, classes_seen, ns_map)
 
 
-# sectiondef kind → summary heading, in Doxygen order.
+# Class-XML sectiondef kind → (summary heading, detail heading).
+# Order in this mapping is the order Doxygen uses on a class page.
 _CLASS_SUMMARY_SECTIONS = [
     ("public-type",             "Public Types"),
     ("public-func",             "Public Member Functions"),
@@ -650,29 +342,23 @@ _CLASS_SUMMARY_SECTIONS = [
 ]
 
 
-def _param_item_lines(nm: str, desc: str) -> list[str]:
-    """Render one `**Parameters**` entry, indenting any multi-line / bulleted
-    description so it nests under the param bullet. Without this a description
-    carrying its own list (e.g. calibration `flags`) collapses into a run-on
-    blob or breaks out past the card boundary as a flat sibling list."""
-    if not desc:
-        return [f"- `{nm}`"]
-    lines = desc.split("\n")
-    out = [f"- `{nm}` — {lines[0]}"]
-    # Continuation lines align with the bullet's content column (2 spaces);
-    # blank lines stay empty so the nested list/paragraphs render loosely.
-    out += [f"  {ln}" if ln.strip() else "" for ln in lines[1:]]
-    return out
-
-
 def _render_member_detail(m: dict, full_name: str) -> list[str]:
-    """Render one member's detail block from XML (no breathe; it chokes).
+    """Render one member's detail block as Markdown straight from the Doxygen
+    XML data — no breathe ``{doxygenfunction}`` / ``{doxygenvariable}`` /
+    ``{doxygentypedef}`` directive.
 
-    `full_name` is the declaration name; `(id)=` keeps `#refid` links working."""
+    breathe's per-overload resolver is unreliable for template-class members
+    (``cv::Mat_``/``Matx``/``Vec`` operators, template-vs-non-template overload
+    sets like ``cv::Mat::ptr``) and for free functions whose Doxygen signature
+    carries OpenCV macros (``CV_OUT Point *``) — it emits "Cannot find" /
+    "Unable to resolve" warnings. We already parse the full member data, so we
+    emit the declaration + brief/detailed + Parameters + Returns ourselves.
+    ``full_name`` is the fully-qualified member name used in the declaration
+    (e.g. ``cv::Mat_::operator()`` or ``cv::checkRange``); the ``(id)=`` anchor
+    keeps the summary-table ``#refid`` links working."""
     short = m["name"]
     kind = m["kind"]
-    # Heading is just `name()` for functions; full signature is in the block below.
-    head = f"{short}()" if kind == "function" else short
+    head = short + (m.get("args", "") if kind == "function" else "")
     out = [f"({m['id']})=", f"### {head}".rstrip(), ""]
 
     # Declaration (template line, if any, then the C++ signature).
@@ -686,31 +372,7 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
                 f"{full_name}{m.get('args', '')}").strip()
     else:  # variable / attribute
         decl = f"{prefix}{typ + ' ' if typ else ''}{full_name}".strip()
-    # Template clause + declaration as inline code (keeps token-linkifier active).
-    _sig = ([f"`{tmpl}`"] if tmpl else []) + [f"`{decl}`"]
-    out += ["\\\n".join(_sig), ""]
-
-    # `#include <…>` card row, like docs.opencv.org.
-    inc = (m.get("include_file") or "").strip()
-    if inc:
-        out += ["{.opencv-api-include}", f"`#include <{inc}>`", ""]
-
-    # Python binding signature(s) from pyopencv_signatures.json (dormant until built).
-    if kind == "function":
-        py_entries = (_PY_SIGNATURES.get(full_name)
-                      or _PY_SIGNATURES.get(f"cv::{full_name}")
-                      or [])
-        if py_entries:
-            out += ["**Python:**", ""]
-            for e in py_entries:
-                py_name = e.get("name", "")
-                if not py_name:
-                    continue
-                py_sig = f"{py_name}({e.get('arg', '')})"
-                py_ret = e.get("ret", "")
-                if py_ret and py_ret not in ("None", ""):
-                    py_sig += f" -> {py_ret}"
-                out += ["```python", py_sig, "```", ""]
+    out += ["```cpp"] + ([tmpl] if tmpl else []) + [decl, "```", ""]
 
     if m.get("brief"):
         out += [m["brief"], ""]
@@ -719,71 +381,52 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     if m.get("params"):
         out += ["**Parameters**", ""]
         for nm, desc in m["params"]:
-            out += _param_item_lines(nm, desc)
+            out.append(f"- `{nm}` — {desc}" if desc else f"- `{nm}`")
         out.append("")
     if m.get("returns"):
         out += ["**Returns**", "", m["returns"], ""]
     return out
 
 
-def _render_core_basic_func(m: dict, idx: int, total: int,
-                            emit_anchor: bool) -> list[str]:
-    """Hand-rolled Function block for api/core_basic (breathe can't parse it).
-
-    Signature is inline code for token-linkifier (translate step 8g); heading
-    `{#cv-slug}` anchor (first overload) is the Functions-table target (step 8i)."""
-    short = m["name"]
-    slug = _func_slug(short)
-    suffix = f" [{idx}/{total}]" if total > 1 else ""
-    head = f"### {short}(){suffix}"
-    out = [f"{head} {{#{slug}}}" if emit_anchor else head, ""]
-    # Template clause + signature as inline code (keeps token-linkifier active).
-    ret = m.get("type") or ""
-    storage = ("static " if m.get("static") else "") \
-        + ("inline " if m.get("inline") else "")
-    qname = m["qualified"] or m["name"]
-    _sig = ([f"`{m['template']}`"] if m.get("template") else []) + \
-        [f"`{storage}{ret} {qname}{m['args']}`"]
-    out += ["\\\n".join(_sig), ""]
-    if m.get("include_file"):
-        out += ["{.opencv-api-include}",
-                f"`#include <{m['include_file']}>`", ""]
-    if m.get("brief"):
-        out += [m["brief"], ""]
-    if m.get("detailed"):
-        out += [m["detailed"], ""]
-    if m.get("params"):
-        out += ["**Parameters**", ""]
-        for nm, desc in m["params"]:
-            out += _param_item_lines(nm, desc)
-        out.append("")
-    if m.get("returns"):
-        out += [f"**Returns** — {m['returns']}", ""]
-    return out
-
-
 def _write_class_stub(cls: dict, out_dir: pathlib.Path,
                       xml_dir: pathlib.Path) -> None:
-    """One .md per inner class, mirroring Doxygen's class-page layout.
+    """One .md per inner class. Mirrors Doxygen's class-page layout:
+      * Brief + detailed description for the class itself
+      * Summary tables, one per sectiondef kind (Public Member Functions,
+        Static Public Member Functions, Protected Attributes, etc.)
+      * Detail blocks per member, grouped Doxygen-style into Constructor &
+        Destructor Documentation / Member Function Documentation /
+        Member Data Documentation / etc.
 
-    Falls back to `{doxygenclass}`/`{doxygenstruct}` if class XML can't be read."""
+    Detail blocks are per-member breathe directives (`{doxygenfunction}` /
+    `{doxygenvariable}` / `{doxygentypedef}`), not the recursive
+    `{doxygenclass} :members:` — the latter is breathe's discrete
+    one-signature-per-method layout that the user wanted replaced.
+
+    Falls back to a bare `{doxygenclass}` / `{doxygenstruct}` if the class
+    XML can't be read (e.g. XML wasn't regenerated)."""
     page = _class_page_name(cls["refid"])
     out = out_dir / f"{page}.md"
     qualified = cls["qualified"] or cls["name"]
-    kind_label = cls["kind"].title()
+    kind_label = cls["kind"].title()  # "Class" / "Struct"
     title = f"{kind_label} {qualified}"
-    # No `{#refid}` anchor; `_generate_api_stubs` seeds `_ANCHOR_TO_DOC` instead.
+    # Note: no `{#refid}` anchor in the heading — duplicates the
+    # docname-derived target. `_generate_api_stubs` seeds the
+    # refid→docname mapping into `_ANCHOR_TO_DOC` for `@ref` resolution.
     lines = [f"# {title}", ""]
 
-    # Class-page header: brief + `View details` + `#include` line.
+    # Class-page header (PR #7): one-line brief + `More...` jump + the
+    # `#include <…>` line, right under the title — mirrors docs.opencv.org.
+    # Read class data early just for the header; the main read happens below
+    # (cheap, and keeps the header above the collaboration diagram).
     _header_data = _read_class_data(cls["refid"], xml_dir)
     if _header_data is not None:
         import html as _html_pkg
         _brief = (_header_data.get("brief") or "").strip()
         if _brief:
-            # Link only when there's a detailed description to jump to.
+            # `More...` only when there's a detailed description to jump to.
             _more = (
-                ' <a class="opencv-class-more" href="#detailed-description">View details</a>'
+                ' <a class="opencv-class-more" href="#detailed-description">More...</a>'
                 if _header_data.get("detailed") else ""
             )
             lines.append(
@@ -799,14 +442,30 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             )
             lines.append("")
 
-    # Collaboration diagram: reuse legacy Doxygen HTML build's SVG.
+    # Collaboration diagram — surface the SVG the legacy Doxygen HTML build
+    # already rendered (the XML pipeline disables graphs; see
+    # `_find_collaboration_svg`). Copy it next to the stub so Sphinx's image
+    # collector publishes it to `_images/`, then reference it relative to the
+    # api/ doc. The `images/`/`js_assets/` rewrite in `_translate` doesn't
+    # touch this path (no such dir segment), and `_img_xtree` leaves
+    # non-contrib image refs unchanged. Absent SVG → section silently omitted.
     _svg = _find_collaboration_svg(cls["refid"], xml_dir.parent / "html")
     _light_name = _dark_name = None
     if _svg is not None:
         import hashlib as _hashlib
         try:
             _raw = _svg.read_text(encoding="utf-8")
-            # Light/dark variants; content-hashed names bust browser caches.
+            # Two theme variants: light = native Doxygen with a transparent
+            # backdrop (white page shows through); dark = recoloured to
+            # light-on-dark so it matches docs.opencv.org and blends with the
+            # dark page. custom.css shows exactly one per active theme.
+            #
+            # Filenames are content-hashed: Doxygen names every diagram
+            # `<refid>__coll__graph.svg`; if a browser cached an older copy
+            # under that fixed name it would keep serving the stale image
+            # (query-string busts don't always work — some caches key on path
+            # only). A hashed filename is a brand-new URL whenever the SVG
+            # content changes, so it can never be served stale.
             _light_txt = _svg_make_transparent(_raw)
             _dark_txt = _svg_dark_variant(_raw)
             _lh = _hashlib.md5(_light_txt.encode("utf-8")).hexdigest()[:10]
@@ -815,13 +474,16 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             _dark_name = f"{_svg.stem}.{_dh}.dark.svg"
             (out_dir / _light_name).write_text(_light_txt, encoding="utf-8")
             (out_dir / _dark_name).write_text(_dark_txt, encoding="utf-8")
-            # Register so the stale-file sweep keeps them.
-            _stub_written.add(out_dir / _light_name)
-            _stub_written.add(out_dir / _dark_name)
         except OSError:
             _light_name = _dark_name = None
     if _light_name is not None:
-        # only-light/only-dark: pydata theme-aware image classes.
+        # `only-light` / `only-dark` are pydata-sphinx-theme's native
+        # theme-aware image classes: the theme shows exactly one per active
+        # colour mode (via `display:none !important`), and — critically —
+        # exempts `.only-dark` images from its
+        # `html[data-theme=dark] .bd-content img { background:#fff }` rule, so
+        # our dark (transparent-backdrop) variant blends with the dark page
+        # instead of getting a white card behind it.
         lines += [
             f"Collaboration diagram for {qualified}:",
             "",
@@ -834,7 +496,8 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
         ]
 
     data = _read_class_data(cls["refid"], xml_dir)
-    if data is None:  # missing XML
+    if data is None:
+        # Fallback for missing XML.
         directive = "doxygenstruct" if cls["kind"] == "struct" else "doxygenclass"
         lines += [
             f"```{{{directive}}} {qualified}",
@@ -855,13 +518,22 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             continue
         lines.append(f"## {summary_title}")
         lines.append("")
+        # Type-bearing sections (functions, variables, typedefs) get a
+        # Return/Type column. Enum-bearing public-type sections get
+        # rendered as code-block synopses instead (matches the group-page
+        # treatment).
         non_enum_items = [m for m in items if m["kind"] != "enum"]
         enum_items = [m for m in items if m["kind"] == "enum"]
         if non_enum_items:
             lines += ["{.api-reference-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in non_enum_items:
-                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                # ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                ret_type = m["type"] or ""
+                # Strip CV_EXPORTS* macros and excess whitespace
+                ret_type = __import__("re").sub(
+                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', ret_type).strip()
+                ret = _md_escape_cell(ret_type) or "&nbsp;"
                 if m["static"]:
                     ret = "static " + ret
                 sig = f"{m['name']}{_md_escape_cell(m['args'])}"
@@ -873,13 +545,23 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             if m["brief"]:
                 lines.append(_md_escape_cell(m["brief"]))
                 lines.append("")
-            # HTML synopsis: `<a>` ids match the `_CPPv4…` detail anchors.
+            # Raw HTML synopsis (NOT a markdown code fence): emits a code-styled
+            # `<div class="highlight-cpp">…<pre>` block where each enum and
+            # enumerator name is wrapped in `<a class="opencv-enum-link"
+            # id="_CPPv4…" href="#_CPPv4…">…</a>`. Same id on the anchor and the
+            # href, so clicking the name updates the URL hash to the
+            # Sphinx-C++-domain-style id and the page snaps to the synopsis
+            # line. `strip_scope=qualified` drops the redundant `cv::_ClassName::`
+            # prefix from the displayed names; the ids keep the full path.
             lines.extend(_enum_synopsis_html(m, strip_scope=qualified))
             lines.append("")
 
-    # 2) Detailed Description via Breathe (description-only; no
-    #    breathe_default_members). `:no-members:` is NOT valid Breathe. Breathe's
-    #    duplicate header stripped later by `_strip_breathe_class_clutter`.
+    # 2) "Detailed Description" — delegated to Breathe's `{doxygenclass}` (PR #7)
+    #    so every Doxygen tag (programlisting, ref, tables, …) renders natively.
+    #    `:no-members:` leaves just the class brief + detailed body; the
+    #    duplicate signature header + leading brief paragraph Breathe emits are
+    #    stripped at build-finished time by `_strip_breathe_class_clutter`. A
+    #    per-class "Examples" cross-reference is appended under the same heading.
     _directive = "doxygenstruct" if cls["kind"] == "struct" else "doxygenclass"
     examples = _find_examples_for_class(qualified.rsplit("::", 1)[-1])
     if data["detailed"]:
@@ -888,15 +570,22 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             "",
             f"```{{{_directive}}} {qualified}",
             ":project: opencv",
+            ":no-members:",
             "```",
             "",
         ]
         lines += _render_examples_block(examples)
     elif examples:
+        # No detailed description, but the class is referenced from sample
+        # code — surface the cross-reference under its own heading.
         lines += ["## Examples", ""]
         lines += _render_examples_block(examples)
 
-    # 3) Per-member detail blocks (ctor/dtor split from other functions).
+    # 3) Per-member detail blocks. Functions split into ctor/dtor vs
+    #    others (mirrors Doxygen's "Constructor & Destructor Documentation"
+    #    + "Member Function Documentation"). Variables → "Member Data
+    #    Documentation". Typedefs → "Member Typedef Documentation".
+    #    Enums → "Member Enumeration Documentation" (synopsis code block).
     class_simple = qualified.rsplit("::", 1)[-1]
 
     typedef_items: list[dict] = []
@@ -924,26 +613,40 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             lines += _render_member_detail(m, f"{qualified}::{m['name']}")
 
     if enum_items_all:
-        # Target of the Public Types synopsis links.
+        # Member Enumeration Documentation: the *destination* the Public Types
+        # synopsis links navigate to. We DON'T repeat the code-block synopsis
+        # here (visually identical to the source the user came from — felt
+        # like clicking went nowhere). Instead each enum becomes a heading +
+        # a definition list where every enumerator is its own row with its
+        # own `id="_CPPv4…"` anchor and (when Doxygen provided one) a brief
+        # description — matching the docs.opencv.org reference layout.
         import html as _html
         lines += ["## Member Enumeration Documentation", ""]
         for m in enum_items_all:
-            lines.append(f"({m['id']})=")  # legacy MyST anchor for old @ref
+            # Keep the legacy MyST anchor (`(<doxygen-refid>)=`) so any older
+            # `@ref` cross-references that point at it still resolve.
+            lines.append(f"({m['id']})=")
             enum_qualified = m.get("qualified") or m["name"]
             enum_id = _sphinx_cpp_v4_id(enum_qualified)
             enum_short = enum_qualified.rsplit("::", 1)[-1]
+            # Heading carries the enum-level `_CPPv4N…E` anchor — clicking the
+            # enum name in Public Types lands here.
             lines.append(
                 f'<h3 class="opencv-enum-heading" id="{enum_id}">'
                 f'enum <span class="opencv-enum-name">{_html.escape(enum_short)}</span></h3>'
             )
             if m["brief"]:
                 lines.append(f"<p>{_html.escape(_md_escape_cell(m['brief']))}</p>")
-            # Each `<dt>` carries its own id for per-value linking.
+            # Per-enumerator rows. Each `<dt>` carries the enumerator's own
+            # `_CPPv4N…E` id so clicking a specific value name in Public Types
+            # lands on its own row, not on the top of the enum block.
             lines.append('<dl class="opencv-enum-detail">')
             for _v in (m.get("enum_values") or []):
                 val_id = _sphinx_cpp_v4_id(f"{enum_qualified}::{_v['name']}")
                 init = _html.escape(_v["initializer"]) if _v["initializer"] else ""
                 init_html = f' <span class="opencv-enum-init">{init}</span>' if init else ""
+                # cv2.* Python name (PR #30), if the signatures artifact exists;
+                # otherwise _python_enum_name returns None and nothing is added.
                 _py = _python_enum_name(enum_qualified, _v["name"],
                                         bool(m.get("strong")))
                 py_html = (f' <span class="opencv-enum-pyname">Python: '
@@ -959,7 +662,9 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
             lines.append('</dl>')
             lines.append("")
 
-    # Dedupe by refid (a memberdef can span sectiondefs).
+    # Dedupe functions: a method can appear in multiple sectiondefs (e.g.
+    # the same memberdef appearing in `public-func` and again via a
+    # `<member refid>` we inlined). The refid is unique per memberdef.
     def _dedupe(items: list[dict]) -> list[dict]:
         seen, out = set(), []
         for m in items:
@@ -987,14 +692,31 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
     _stub_write(out, "\n".join(lines))
 
 
-def _generate_api_stubs(modules, xml_dir, out_dir):
-    """Generate the api/ stub tree: group/namespace pages, then class pages."""
+def _generate_api_stubs(modules, xml_dir, out_dir,
+                        root_name="api_root", root_title="API Reference",
+                        description="Sphinx-rendered API reference for OpenCV main modules. Each entry\nbelow is a module's umbrella `@defgroup`; sub-pages mirror the\nDoxygen subgroup hierarchy."):
+    """Generate the full api/ stub tree. Write-if-changed: only stubs whose
+    content actually changed are rewritten, so Sphinx's incremental build
+    reprocesses the minimum. Stale files (from removed modules) are swept at
+    the end.
+
+    Passes:
+      1. Walk each module's group hierarchy → emit one group .md per node
+         (parent index pages + leaf pages with summary tables + per-member
+         detail blocks), plus one `namespace_<slug>.md` per namespace the
+         module's groups expose. `classes_seen` is populated as a side-effect.
+      2. Emit one .md per unique inner class — the per-class subpages the
+         group pages link to."""
     if not modules:
         return
     if not xml_dir.is_dir():
-        return  # No XML yet; degrade silently.
+        return  # No XML yet (sphinx-xml not run); degrade silently.
 
-    # Freshness guard: skip rebuild if tree newer than XML and has ns stubs.
+    # Freshness guard: if the stub tree is at least as new as the source XML
+    # index AND already carries namespace stubs (i.e. was produced by this
+    # namespace-aware generator), there's nothing to regenerate — just reseed
+    # the refid → docname map so `@ref` cross-refs keep resolving, and return.
+    # A tree predating namespace stubs falls through to a full rebuild.
     src_index = xml_dir / "index.xml"
     root_md = out_dir / "api_root.markdown"
     if (src_index.is_file() and root_md.is_file()
@@ -1014,57 +736,49 @@ def _generate_api_stubs(modules, xml_dir, out_dir):
     global _stub_written
     _stub_written = set()
     root_lines = [
-        "API Reference {#api_root}",
-        "=============",
+        f"{root_title} {{#{root_name}}}",
+        "=" * len(root_title),
         "",
-        "Sphinx-rendered API reference for OpenCV main modules. Each entry",
-        "below is a module's umbrella `@defgroup`; sub-pages mirror the",
-        "Doxygen subgroup hierarchy.",
-        "",
-    ]
+    ] + [line for line in description.split("\n")] + [""]
     classes_seen: dict[str, dict] = {}
-    # Pass 1 — accumulate group_info + ns_group_map across all modules so
-    # namespaces in multiple modules (e.g. cv::traits) get all breadcrumbs.
-    global_group_info: dict[str, dict] = {}
-    global_ns_group_map: dict[str, set] = {}
-    trees: list = []
+    written_ns: set[str] = set()   # namespace stubs are shared across groups
     for m in modules:
-        tree = _build_api_hierarchy("group__" + m.replace("_", "__"), xml_dir)
+        tree = _build_api_hierarchy(
+            "group__" + m.replace("_", "__"), xml_dir)
         if tree is None:
             continue
-        trees.append(tree)
         root_lines.append(f"- @subpage api_{tree['name']}")
+        # Namespaces exposed by any group in this module's hierarchy. Build the
+        # ns→group map once, then attach each group's namespaces to `ns_map`
+        # (consumed by `_write_api_stub` to emit the per-group "## Namespaces"
+        # section) and write each namespace page once.
         all_group_names = _collect_all_group_names(tree)
         all_refids = ["group__" + n.replace("_", "__") for n in all_group_names]
-        for ns_name, grps in _build_ns_group_map(all_refids, xml_dir).items():
-            global_ns_group_map.setdefault(ns_name, set()).update(grps)
-        def _flatten(node: dict, parent: str | None) -> None:
-            global_group_info[node["name"]] = {"title": node["title"], "parent": parent}
-            for child in node.get("children", []):
-                _flatten(child, node["name"])
-        _flatten(tree, None)
-    # Pass 2 — write namespace stubs (once each) then group stubs.
-    written_ns: set[str] = set()
-    for tree in trees:
-        all_group_names = _collect_all_group_names(tree)
+        ns_group_map = _build_ns_group_map(all_refids, xml_dir)
         ns_map: dict[str, list] = {}
         for group_name in all_group_names:
-            for ns in _namespaces_for_group(group_name, xml_dir, global_ns_group_map):
+            for ns in _namespaces_for_group(group_name, xml_dir, ns_group_map):
                 anchor = f"api_ns_{ns['name'].replace('::', '__')}"
-                if ns["name"] not in written_ns:
-                    _write_namespace_stub(ns, out_dir, xml_dir,
-                                          global_ns_group_map, global_group_info)
+                if ns["name"] not in written_ns:   # shared across groups
+                    _write_namespace_stub(ns, out_dir, xml_dir)
                     written_ns.add(ns["name"])
                 ns_map.setdefault(group_name, []).append((ns["name"], anchor))
         _write_api_stub(tree, out_dir, classes_seen, ns_map)
-    # Per-class pages; seed `_ANCHOR_TO_DOC` refid→docname for `@ref`.
+    # Per-class pages (one per unique refid across all groups). We also
+    # seed `_ANCHOR_TO_DOC` directly with refid -> docname so `@ref`
+    # cross-references in tutorial markdown (and in any group page) keep
+    # working — the per-class page no longer carries a `{#refid}` heading
+    # anchor (would duplicate the docname-derived target).
+    dir_prefix = out_dir.name
     for cls in classes_seen.values():
         _write_class_stub(cls, out_dir, xml_dir)
-        _ANCHOR_TO_DOC[cls["refid"]] = f"api/{_class_page_name(cls['refid'])}"
-    _stub_write(out_dir / "api_root.markdown", "\n".join(root_lines) + "\n")
-    # Sweep stale files.
+        _ANCHOR_TO_DOC[cls["refid"]] = f"{dir_prefix}/{_class_page_name(cls['refid'])}"
+    _stub_write(out_dir / f"{root_name}.markdown", "\n".join(root_lines) + "\n")
+    # Sweep stale files left by removed modules / renamed pages.
     for _p in list(out_dir.iterdir()):
         if _p.is_file() and _p not in _stub_written:
             _p.unlink()
-    # Flush per-sample example pages now to avoid orphans.
+    # Flush per-sample example pages (PR #7) into a sibling `examples/` dir.
+    # The set was populated by `_find_examples_for_class` while each class stub
+    # was written above — generating now avoids orphan pages no class links to.
     _generate_example_pages(out_dir.parent / "examples")

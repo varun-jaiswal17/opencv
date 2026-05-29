@@ -189,7 +189,7 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
   # Contrib modules to include in Doxygen XML (for Extra Modules API reference).
   # Override: cmake -DSPHINX_CONTRIB_API_MODULES="ml;face" ..
   if(NOT DEFINED SPHINX_CONTRIB_API_MODULES)
-    set(SPHINX_CONTRIB_API_MODULES "ml")
+    set(SPHINX_CONTRIB_API_MODULES "ml;alphamat")
   endif()
   set(_contrib_doxy_input "")
   foreach(_m ${SPHINX_CONTRIB_API_MODULES})
