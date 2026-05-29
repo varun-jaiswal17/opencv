@@ -181,6 +181,18 @@ endforeach()
 
 if(EXISTS "${_LEGACY_DOXYFILE}")
   set(_SPHINX_DOXYFILE "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile-xml")
+  # Contrib modules to include in Doxygen XML (for Extra Modules API reference).
+  # Override: cmake -DSPHINX_CONTRIB_API_MODULES="ml;face" ..
+  if(NOT DEFINED SPHINX_CONTRIB_API_MODULES)
+    set(SPHINX_CONTRIB_API_MODULES "ml")
+  endif()
+  set(_contrib_doxy_input "")
+  foreach(_m ${SPHINX_CONTRIB_API_MODULES})
+    if(OPENCV_EXTRA_MODULES_PATH AND EXISTS "${OPENCV_EXTRA_MODULES_PATH}/${_m}/include")
+      string(APPEND _contrib_doxy_input " ${OPENCV_EXTRA_MODULES_PATH}/${_m}/include")
+    endif()
+  endforeach()
+
   file(WRITE "${_SPHINX_DOXYFILE}"
     "@INCLUDE = ${_LEGACY_DOXYFILE}\n"
     "GENERATE_HTML = NO\n"
@@ -196,12 +208,16 @@ if(EXISTS "${_LEGACY_DOXYFILE}")
     "INCLUDE_GRAPH = NO\n"
     "INCLUDED_BY_GRAPH = NO\n"
     "DIRECTORY_GRAPH = NO\n"
+<<<<<<< Updated upstream
     "INPUT =${_doxy_input}\n"
     "RECURSIVE = YES\n"
     # Remove cv::traits::* from EXCLUDE_SYMBOLS so Depth<T>/Type<T>/SafeType<T>/SafeFmt<T> get XML.
     # CV_CREATE_MEMBER_CHECK crashes Doxygen's C++ parser; expand to nothing via PREDEFINED.
     "EXCLUDE_SYMBOLS = cv::DataType<*> int void CV__* T __CV* cv::gapi::detail*\n"
     "MACRO_EXPANSION = NO\n"
+=======
+    "INPUT +=${_contrib_doxy_input}\n"
+>>>>>>> Stashed changes
   )
   find_program(DOXYGEN_EXE NAMES doxygen)
   if(DOXYGEN_EXE)
@@ -240,6 +256,7 @@ set(_SPHINX_ENV
   "OPENCV_SPHINX_INPUT_ROOT=${_SPHINX_INPUT_ROOT}"
   "OPENCV_CONTRIB_ROOT=${OPENCV_EXTRA_MODULES_PATH}"
   "OPENCV_DOXYGEN_XML_DIR=${_DOXYGEN_XML_DIR}"
+  "OPENCV_CONTRIB_API_MODULES=${SPHINX_CONTRIB_API_MODULES}"
 )
 if(OPENCV_PYTHON_SIGNATURES_FILE)
   list(APPEND _SPHINX_ENV "OPENCV_PYTHON_SIGNATURES_FILE=${OPENCV_PYTHON_SIGNATURES_FILE}")
