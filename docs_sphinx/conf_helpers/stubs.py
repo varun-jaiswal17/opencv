@@ -815,6 +815,23 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
                     py_sig += f" -> {py_ret}"
                 out += ["```python", py_sig, "```", ""]
 
+    # Python binding signature(s) from pyopencv_signatures.json (dormant until built).
+    if kind == "function":
+        py_entries = (_PY_SIGNATURES.get(full_name)
+                      or _PY_SIGNATURES.get(f"cv::{full_name}")
+                      or [])
+        if py_entries:
+            out += ["**Python:**", ""]
+            for e in py_entries:
+                py_name = e.get("name", "")
+                if not py_name:
+                    continue
+                py_sig = f"{py_name}({e.get('arg', '')})"
+                py_ret = e.get("ret", "")
+                if py_ret and py_ret not in ("None", ""):
+                    py_sig += f" -> {py_ret}"
+                out += ["```python", py_sig, "```", ""]
+
     if m.get("brief"):
         out += [m["brief"], ""]
     if m.get("detailed"):
