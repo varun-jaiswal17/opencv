@@ -92,7 +92,11 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
             lines += ["{.api-reference-table .api-function-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
-                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                ret_type = m["type"] or ""
+                # Strip CV_EXPORTS* macros and excess whitespace
+                ret_type = __import__("re").sub(
+                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', ret_type).strip()
+                ret = _md_escape_cell(ret_type) or "&nbsp;"
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
                 lines.append(
                     f"| `{ret}` | [`{label}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
@@ -101,7 +105,10 @@ def _write_namespace_stub(ns: dict, out_dir: pathlib.Path,
                       else "{.api-reference-table}")
             lines += [marker, "| Type | Name | Description |", "|---|---|---|"]
             for m in items:
-                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                type_str = m["type"] or ""
+                type_str = __import__("re").sub(
+                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', type_str).strip()
+                t = _md_escape_cell(type_str) or "&nbsp;"
                 lines.append(
                     f"| `{t}` | [`{m['name']}`](#{m['id']}) | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
@@ -231,7 +238,11 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             lines += ["{.api-reference-table .api-function-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
-                ret = _md_escape_cell(m["type"]) or "&nbsp;"
+                ret_type = m["type"] or ""
+                # Strip CV_EXPORTS* macros and excess whitespace
+                ret_type = __import__("re").sub(
+                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', ret_type).strip()
+                ret = _md_escape_cell(ret_type) or "&nbsp;"
                 label = f"{m['name']}{_md_escape_cell(m['args'])}"
                 sig_link = _member_anchor_link(m, label)
                 lines.append(
@@ -242,7 +253,10 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
                       else "{.api-reference-table}")
             lines += [marker, "| Type | Name | Description |", "|---|---|---|"]
             for m in items:
-                t = _md_escape_cell(m["type"]) or "&nbsp;"
+                type_str = m["type"] or ""
+                type_str = __import__("re").sub(
+                    r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', type_str).strip()
+                t = _md_escape_cell(type_str) or "&nbsp;"
                 name_link = _member_anchor_link(m, m["name"])
                 lines.append(f"| `{t}` | {name_link} | {_md_escape_cell(m['brief'])} |")
         elif section_title == "Enumerations":
