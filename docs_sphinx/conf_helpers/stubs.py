@@ -1098,6 +1098,14 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
                       f'{_html_pkg2.escape(_base)}</a>')
         else:
             _flink = _html_pkg2.escape(_src_inc)
+        # Emit under a popping `##` heading so the footer lands OUTSIDE the last
+        # member's card (markdown nests trailing content into the preceding
+        # section; only a heading breaks out of it). The attrs_block CLASS tags
+        # the section so custom.css can hide the heading + its page-TOC entry,
+        # leaving just the Doxygen-style "generated from" line below the cards.
+        # NB: no explicit `{#id}` — a fixed id repeated across every class page
+        # registers a global label and triggers "duplicate label" warnings; the
+        # per-page heading slug (#source-file) does not.
         lines += [
             "",
             "{.opencv-class-files}",
