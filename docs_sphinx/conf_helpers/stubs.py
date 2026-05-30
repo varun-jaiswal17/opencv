@@ -238,8 +238,12 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             lines += ["{.api-reference-table .api-function-table}",
                       "| Return | Name | Description |", "|---|---|---|"]
             for m in items:
+                # Skip malformed entries where Doxygen parsed CV_EXPORTS_AS
+                # as a function name (e.g. CV_EXPORTS_AS(filter2Dp)).
+                if (m["name"] or "").startswith("CV_EXPORTS"):
+                    continue
                 ret_type = m["type"] or ""
-                # Strip CV_EXPORTS* macros and excess whitespace
+                # Strip CV_EXPORTS* macros from type
                 ret_type = __import__("re").sub(
                     r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', ret_type).strip()
                 ret = _md_escape_cell(ret_type) or "&nbsp;"
@@ -296,6 +300,9 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
             continue
         blocks: list[list[str]] = []
         for m in items:
+            # Skip malformed CV_EXPORTS_AS entries parsed as function names.
+            if (m["name"] or "").startswith("CV_EXPORTS"):
+                continue
             # Class members render on their own class page; skip on the group.
             if kind_key in ("function", "variable") and _is_class_member(m):
                 continue
@@ -372,7 +379,7 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     keeps the summary-table ``#refid`` links working."""
     short = m["name"]
     kind = m["kind"]
-    head = short + (m.get("args", "") if kind == "function" else "")
+    head = short + "()" if kind == "function" else short
     out = [f"({m['id']})=", f"### {head}".rstrip(), ""]
 
     # Declaration (template line, if any, then the C++ signature).
@@ -395,9 +402,34 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
                 f"{full_name}{m.get('args', '')}").strip()
     else:  # variable / attribute
         decl = f"{prefix}{typ + ' ' if typ else ''}{full_name}".strip()
+    # Strip CV_EXPORTS* macros from the C++ declaration
+    decl = __import__("re").sub(
+        r'\bCV_EXPORTS(?:_W|_AS\([^)]*\))?\s*', '', decl).strip()
     out += ["```cpp"] + ([tmpl] if tmpl else []) + [decl, "```", ""]
     if qualifier_badge:
         out += [qualifier_badge, ""]
+    # Include header file
+    inc = (m.get("include_file") or "").strip()
+    if inc:
+        out += [f'<div class="opencv-class-include"><code>#include &lt;{inc}&gt;</code></div>', ""]
+    # Python signature from pyopencv_signatures.json
+    if kind == "function":
+        # Try full_name as-is, then with cv:: prefix (group-page members
+        # often lack <qualifiedname> in XML so full_name is the bare name).
+        py_entries = (_PY_SIGNATURES.get(full_name)
+                      or _PY_SIGNATURES.get(f"cv::{full_name}")
+                      or [])
+        if py_entries:
+            out += ["**Python:**", ""]
+            for e in py_entries:
+                py_name = e.get("name", "")
+                py_arg  = e.get("arg", "")
+                py_ret  = e.get("ret", "")
+                if py_name:
+                    py_sig = f"{py_name}({py_arg})"
+                    if py_ret and py_ret not in ("None", ""):
+                        py_sig += f" -> {py_ret}"
+                    out += ["```python", py_sig, "```", ""]
 
     if m.get("brief"):
         out += [m["brief"], ""]
