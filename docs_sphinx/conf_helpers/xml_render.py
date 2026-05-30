@@ -698,6 +698,20 @@ def _find_collaboration_svg(refid: str, html_root: pathlib.Path) -> pathlib.Path
     return matches[0] if matches else None
 
 
+def _find_call_graph_svg(member_id: str, html_root: pathlib.Path) -> pathlib.Path | None:
+    """Locate the Doxygen-generated call-graph SVG for a member function.
+
+    Doxygen names it ``{class_refid}_{member_hash}_cgraph.svg``, where the
+    XML member id is ``{class_refid}_1{member_hash}`` (``_1`` is Doxygen's
+    class/member separator). Strip the ``_1`` to recover the file stem."""
+    import re as _re
+    if not html_root.is_dir():
+        return None
+    file_stem = _re.sub(r"_1([0-9a-f]+)$", r"_\1", member_id)
+    matches = sorted(html_root.rglob(f"{file_stem}_cgraph.svg"))
+    return matches[0] if matches else None
+
+
 def _svg_make_transparent(text: str) -> str:
     """Light-mode: make only the full-canvas backdrop transparent."""
     return text.replace('fill="white" stroke="transparent"',
@@ -935,7 +949,7 @@ __all__ = [
     "_build_api_hierarchy", "_parse_member_sections", "_md_escape_cell",
     "_MEMBER_DIRECTIVE", "_MEMBER_DETAIL_SECTION", "_sphinx_cpp_v4_id",
     "_enum_synopsis_html", "_enum_synopsis_lines", "_function_signature",
-    "_class_page_name", "_read_class_data", "_find_collaboration_svg",
+    "_class_page_name", "_read_class_data", "_find_collaboration_svg", "_find_call_graph_svg",
     "_svg_make_transparent", "_svg_dark_variant",
     "_patch_namespace_xml_for_breathe",
     "_build_ns_group_map", "_namespaces_for_group",

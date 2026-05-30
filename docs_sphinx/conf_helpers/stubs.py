@@ -363,7 +363,16 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
 
     # Declaration (template line, if any, then the C++ signature).
     tmpl = m.get("template") or ""
-    prefix = "static " if m.get("static") else ""
+    is_static = m.get("static")
+    is_inline = m.get("inline")
+    prefix = ("static " if is_static else "") + ("inline " if is_inline else "")
+    qualifier_badge = ""
+    if is_static and is_inline:
+        qualifier_badge = " `[inlinestatic]`"
+    elif is_static:
+        qualifier_badge = " `[static]`"
+    elif is_inline:
+        qualifier_badge = " `[inline]`"
     typ = (m.get("type") or "").strip()
     if kind == "typedef":
         decl = f"typedef {typ} {full_name}".strip()
@@ -373,6 +382,8 @@ def _render_member_detail(m: dict, full_name: str) -> list[str]:
     else:  # variable / attribute
         decl = f"{prefix}{typ + ' ' if typ else ''}{full_name}".strip()
     out += ["```cpp"] + ([tmpl] if tmpl else []) + [decl, "```", ""]
+    if qualifier_badge:
+        out += [qualifier_badge, ""]
 
     if m.get("brief"):
         out += [m["brief"], ""]
@@ -537,7 +548,16 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
                 if m["static"]:
                     ret = "static " + ret
                 sig = f"{m['name']}{_md_escape_cell(m['args'])}"
-                sig_link = f"[`{sig}`](#{m['id']})"
+                qualifier = ""
+                if m.get("static") and m.get("inline"):
+                    qualifier = " `[inlinestatic]`"
+                elif m.get("static"):
+                    qualifier = " `[static]`"
+                elif m.get("inline"):
+                    qualifier = " `[inline]`"
+                elif m.get("virtual"):
+                    qualifier = " `[virtual]`"
+                sig_link = f"[`{sig}`](#{m['id']}){qualifier}"
                 lines.append(
                     f"| `{ret}` | {sig_link} | {_md_escape_cell(m['brief'])} |")
             lines.append("")
@@ -681,8 +701,35 @@ def _write_class_stub(cls: dict, out_dir: pathlib.Path,
 
     if func_items:
         lines += ["## Member Function Documentation", ""]
+        _html_root = xml_dir.parent / "html"
         for m in _dedupe(func_items):
-            lines += _render_member_detail(m, f"{qualified}::{m['name']}")
+            member_lines = _render_member_detail(m, f"{qualified}::{m['name']}")
+            # Append call graph SVG if Doxygen generated one for this function.
+            _cgraph = _find_call_graph_svg(m["id"], _html_root)
+            if _cgraph is not None:
+                import hashlib as _hl
+                _raw = _cgraph.read_text(encoding="utf-8")
+                _lt = _svg_make_transparent(_raw)
+                _dk = _svg_dark_variant(_raw)
+                _lh = _hl.md5(_lt.encode()).hexdigest()[:10]
+                _dh = _hl.md5(_dk.encode()).hexdigest()[:10]
+                _ln = f"{_cgraph.stem}.{_lh}.svg"
+                _dn = f"{_cgraph.stem}.{_dh}.dark.svg"
+                (out_dir / _ln).write_text(_lt, encoding="utf-8")
+                (out_dir / _dn).write_text(_dk, encoding="utf-8")
+                _stub_written.add(out_dir / _ln)
+                _stub_written.add(out_dir / _dn)
+                member_lines += [
+                    "Here is the call graph for this function:",
+                    "",
+                    f"![Call graph for {qualified}::{m['name']}]({_ln})"
+                    "{.opencv-coll-graph .only-light}",
+                    "",
+                    f"![Call graph for {qualified}::{m['name']}]({_dn})"
+                    "{.opencv-coll-graph .only-dark}",
+                    "",
+                ]
+            lines += member_lines
 
     if var_items:
         lines += ["## Member Data Documentation", ""]
