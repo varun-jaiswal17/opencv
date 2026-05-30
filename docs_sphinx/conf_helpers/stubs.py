@@ -365,6 +365,10 @@ def _write_api_stub(node: dict, out_dir: pathlib.Path,
 
     lines = [f"# {title} {{#api_{name}}}", ""]
 
+    # Subgroup index: emit the @subpage Topics list first (the
+    # `_subpage_list_to_toctree` rule turns it into a real toctree), then fall
+    # through to this group's OWN members below — a group can have both, which
+    # matches the live Doxygen group-page layout. Children are recursed at the end.
     if node["children"]:
         lines += ["## Topics", ""]
         for child in node["children"]:
