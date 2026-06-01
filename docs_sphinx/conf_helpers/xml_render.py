@@ -163,14 +163,32 @@ def _member_detail_parts(md):
             if ss.get("kind") == "return":
                 returns = _itertext(ss)
     # Prune the param/return chrome (rendered separately) then convert the rest
-    # with full block support so lists and notes survive.
+    # with full block support so lists and notes survive. Preserve tail text when
+    # removing elements so descriptions after parameterlist are not lost.
     pruned = _copy.deepcopy(de)
     for para in pruned.findall("para"):
         for child in list(para):
             if child.tag == "parameterlist":
+                # Preserve tail text (text after the element) by moving it to previous sibling
+                if child.tail:
+                    prev_idx = list(para).index(child) - 1
+                    if prev_idx >= 0:
+                        prev_sibling = para[prev_idx]
+                        prev_sibling.tail = (prev_sibling.tail or "") + child.tail
+                    else:
+                        # No previous sibling, prepend to para text
+                        para.text = (para.text or "") + child.tail
                 para.remove(child)
             elif (child.tag == "simplesect"
                   and child.get("kind") in ("param", "templateparam", "return")):
+                # Same tail preservation for simplesect
+                if child.tail:
+                    prev_idx = list(para).index(child) - 1
+                    if prev_idx >= 0:
+                        prev_sibling = para[prev_idx]
+                        prev_sibling.tail = (prev_sibling.tail or "") + child.tail
+                    else:
+                        para.text = (para.text or "") + child.tail
                 para.remove(child)
     return _doxygen_desc_to_md(pruned), params, returns
 
