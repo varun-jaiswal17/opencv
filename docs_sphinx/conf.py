@@ -168,21 +168,15 @@ html_theme_options = {
     "logo": {"text": f"OpenCV {release}"},
     # Show all 7 Doxygen-style nav links inline (no "More" dropdown).
     "header_links_before_dropdown": 7,
-    # Doxygen-style top-level nav (the legacy site's MAIN PAGE / RELATED
-    # PAGES / NAMESPACES / CLASSES / FILES / EXAMPLES / JAVA DOCUMENTATION).
-    # Declared via the theme's `external_links` slot only because that's the
-    # data hook for a custom header nav — but these are NOT external: the
-    # navbar-nav.html override rewrites each DOXYGEN_BASE_URL target to a
-    # relative path into the locally-built Doxygen output and renders them as
-    # in-tab links, so navigation stays on-site (see html_context below).
+    # API reference nav — points to Sphinx-built API pages (Breathe + Python signatures)
     "external_links": [
-        {"url": _doxygen_url("index.html"),       "name": "Main Page"},
-        {"url": _doxygen_url("pages.html"),       "name": "Related Pages"},
-        {"url": _doxygen_url("namespaces.html"),  "name": "Namespaces"},
-        {"url": _doxygen_url("annotated.html"),   "name": "Classes"},
-        {"url": _doxygen_url("files.html"),       "name": "Files"},
-        {"url": _doxygen_url("examples.html"),    "name": "Examples"},
-        {"url": DOXYGEN_BASE_URL + "javadoc/",    "name": "Java Documentation"},
+        {"url": "api/index.html",           "name": "Main Page"},
+        {"url": "api/pages.html",           "name": "Related Pages"},
+        {"url": "api/namespaces.html",      "name": "Namespaces"},
+        {"url": "api/annotated.html",       "name": "Classes"},
+        {"url": "api/files.html",           "name": "Files"},
+        {"url": "api/examples.html",        "name": "Examples"},
+        {"url": "api/javadoc/index.html",   "name": "Java Documentation"},
     ],
     "show_toc_level": 2,
     "navigation_with_keys": True,

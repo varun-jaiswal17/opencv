@@ -53,6 +53,9 @@ _scan_internal(SPHINX_INPUT_ROOT / "faq.markdown")
 _scan_internal(SPHINX_INPUT_ROOT / "citelist.markdown")
 _scan_internal(SPHINX_INPUT_ROOT / "intro.markdown")
 
+# Image file extensions (must be defined before use)
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp"}
+
 if API_MODULES:
     # 0) Module API figures (e.g. modules/calib/doc/pics/pinhole_camera_model.png,
     #    referenced by Doxygen `@image html …` in group docs) live OUTSIDE
@@ -129,7 +132,6 @@ _REFERENCED_ANCHORS.update({
 })
 
 # Image basename index (mirrors Doxygen's flat IMAGE_PATH lookup).
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp"}
 for _root in ((DOC_ROOT / "tutorials").rglob("images/*"),
               (DOC_ROOT / "js_tutorials").rglob("images/*"),
               (DOC_ROOT / "js_tutorials" / "js_assets").glob("*"),
