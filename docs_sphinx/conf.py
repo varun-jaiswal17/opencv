@@ -160,7 +160,7 @@ html_theme_options = {
     "show_toc_level": 2,
     "navigation_with_keys": True,
     "show_prev_next": True,
-    "show_nav_level": 2,
+    "show_nav_level": 1,
     "navigation_depth": 4,
     "secondary_sidebar_items": {"**": ["page-toc"], "index": []},
     "back_to_top_button": True,
