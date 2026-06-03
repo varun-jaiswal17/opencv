@@ -143,6 +143,36 @@ def _generate_search_map(out_dir: pathlib.Path) -> None:
     (out_dir / "_static" / "search_map.js").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _fix_gapi_images(out_dir: pathlib.Path) -> None:
+    """Copy gapi doc images to _images/ and fix src paths in gapi.html."""
+    gapi_html = out_dir / "extra_modules" / "gapi.html"
+    if not gapi_html.is_file():
+        return
+    images_dir = out_dir / "_images"
+    images_dir.mkdir(exist_ok=True)
+
+    text = gapi_html.read_text(encoding="utf-8")
+
+    def _fix_src(m):
+        raw_path = m.group(1)
+        if "contrib_modules" not in raw_path:
+            return m.group(0)
+        # raw_path is relative to extra_modules/ in the browser,
+        # but the file lives at out_dir / raw_path (no extra_modules prefix)
+        src_file = out_dir / raw_path
+        if not src_file.is_file():
+            return m.group(0)
+        dest = images_dir / src_file.name
+        if not dest.is_file():
+            import shutil as _shutil
+            _shutil.copy2(src_file, dest)
+        return f'src="../_images/{src_file.name}"'
+
+    new_text = re.sub(r'src="([^"]+)"', _fix_src, text)
+    if new_text != text:
+        gapi_html.write_text(new_text, encoding="utf-8")
+
+
 def _inline_coll_graphs_on_finish(app, exception):
     """build-finished entry point."""
     if exception is not None:
@@ -151,4 +181,5 @@ def _inline_coll_graphs_on_finish(app, exception):
     for _api in ("main_modules", "extra_modules"):
         _inline_collaboration_svgs(out / _api, out / "_images")
         _strip_breathe_class_clutter(out / _api)
+    _fix_gapi_images(out)
     _generate_search_map(out)
