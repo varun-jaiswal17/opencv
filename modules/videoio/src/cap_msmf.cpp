@@ -451,45 +451,57 @@ public:
         HRESULT hr = S_OK;
         try
         {
-            cv::AutoLock lock(m_mutex);
-
-            if (SUCCEEDED(hrStatus))
+            bool needEvent = false;
             {
-                if (pSample)
+                cv::AutoLock lock(m_mutex);
+
+                if (SUCCEEDED(hrStatus))
                 {
-                    CV_LOG_DEBUG(NULL, "videoio(MSMF): got frame at " << llTimestamp);
-                    if (m_capturedFrames.size() >= MSMF_READER_MAX_QUEUE_SIZE)
+                    if (pSample)
                     {
+                        CV_LOG_DEBUG(NULL, "videoio(MSMF): got frame at " << llTimestamp);
+                        if (m_capturedFrames.size() >= MSMF_READER_MAX_QUEUE_SIZE)
+                        {
 #if 0
-                        CV_LOG_DEBUG(NULL, "videoio(MSMF): drop frame (not processed). Timestamp=" << m_capturedFrames.front().timestamp);
-                        m_capturedFrames.pop();
+                            CV_LOG_DEBUG(NULL, "videoio(MSMF): drop frame (not processed). Timestamp=" << m_capturedFrames.front().timestamp);
+                            m_capturedFrames.pop();
 #else
 
-                        CV_LOG_DEBUG(NULL, "videoio(MSMF): drop previous frames (not processed): " << m_capturedFrames.size());
-                        std::queue<CapturedFrameInfo>().swap(m_capturedFrames);  // similar to missing m_capturedFrames.clean();
+                            CV_LOG_DEBUG(NULL, "videoio(MSMF): drop previous frames (not processed): " << m_capturedFrames.size());
+                            std::queue<CapturedFrameInfo>().swap(m_capturedFrames);  // similar to missing m_capturedFrames.clean();
 #endif
+                        }
+                        m_capturedFrames.emplace(CapturedFrameInfo{ llTimestamp, _ComPtr<IMFSample>(pSample), hrStatus });
                     }
-                    m_capturedFrames.emplace(CapturedFrameInfo{ llTimestamp, _ComPtr<IMFSample>(pSample), hrStatus });
+                }
+                else
+                {
+                    CV_LOG_WARNING(NULL, "videoio(MSMF): OnReadSample() is called with error status: " << hrStatus);
+                }
+                if (MF_SOURCE_READERF_ENDOFSTREAM & dwStreamFlags)
+                {
+                    // Reached the end of the stream.
+                    m_bEOS = true;
+                }
+                m_hrStatus = hrStatus;
+                needEvent = (pSample != NULL) || m_bEOS;
+            } // m_mutex released before ReadSample() to prevent re-entrant deadlock
+
+            // ReadSample() must be called outside m_mutex: for some containers
+            // (e.g. mpg) MSMF fires OnReadSample synchronously on the same thread,
+            // which would re-acquire m_mutex and deadlock.
+            if (!m_bEOS)
+            {
+                if (FAILED(hr = m_reader->ReadSample(dwStreamIndex, 0, NULL, NULL, NULL, NULL)))
+                {
+                    CV_LOG_WARNING(NULL, "videoio(MSMF): async ReadSample() call is failed with error status: " << hr);
+                    cv::AutoLock lock(m_mutex);
+                    m_bEOS = true;
+                    needEvent = true;
                 }
             }
-            else
-            {
-                CV_LOG_WARNING(NULL, "videoio(MSMF): OnReadSample() is called with error status: " << hrStatus);
-            }
-            if (MF_SOURCE_READERF_ENDOFSTREAM & dwStreamFlags)
-            {
-                // Reached the end of the stream.
-                m_bEOS = true;
-            }
-            m_hrStatus = hrStatus;
 
-            if (FAILED(hr = m_reader->ReadSample(dwStreamIndex, 0, NULL, NULL, NULL, NULL)))
-            {
-                CV_LOG_WARNING(NULL, "videoio(MSMF): async ReadSample() call is failed with error status: " << hr);
-                m_bEOS = true;
-            }
-
-            if (pSample || m_bEOS)
+            if (needEvent)
             {
                 SetEvent(m_hEvent);
             }
