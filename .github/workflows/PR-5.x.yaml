@@ -35,6 +35,7 @@ jobs:
     steps:
       - run: echo "Priority phase complete - releasing the rest of the flow."
 
+  # --- Linux Group 1: Core Ubuntu (U26/U24/U22/U20 matrix) ---
   Linux:
     needs: priority-gate
     if: ${{ !cancelled() && !contains(github.event.pull_request.labels.*.name, 'priority:linux') }}
@@ -42,13 +43,25 @@ jobs:
     with:
       workflow_branch: 'main'
 
-  Linux-no-HAL:
+  # --- Linux Group 2: Validation (OpenVINO → No-HAL, sequential on same runner) ---
+  Ubuntu2004-x64-OpenVINO:
     needs: priority-gate
+    if: ${{ !cancelled() }}
+    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-5.x-U20-OpenVINO.yaml@main
+
+  Linux-no-HAL:
+    needs: Ubuntu2004-x64-OpenVINO
     if: ${{ !cancelled() }}
     uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-Linux-NoHAL.yaml@main
 
-  Linux-Apline:
+  # --- Linux Group 3: Extended (CUDA → Alpine, sequential on same runner) ---
+  Ubuntu2004-x64-CUDA:
     needs: priority-gate
+    if: "${{ contains(github.event.pull_request.labels.*.name, 'category: dnn') }} || ${{ contains(github.event.pull_request.labels.*.name, 'category: dnn (onnx)') }}"
+    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-5.x-U20-Cuda.yaml@main
+
+  Linux-Apline:
+    needs: Ubuntu2004-x64-CUDA
     if: ${{ !cancelled() }}
     uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-Linux-Alpine.yaml@main
 
@@ -68,16 +81,6 @@ jobs:
     needs: priority-gate
     if: ${{ !cancelled() }}
     uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-5.x-ARM64-Debug.yaml@main
-
-  Ubuntu2004-x64-OpenVINO:
-    needs: priority-gate
-    if: ${{ !cancelled() }}
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-5.x-U20-OpenVINO.yaml@main
-
-  Ubuntu2004-x64-CUDA:
-    needs: priority-gate
-    if: "${{ contains(github.event.pull_request.labels.*.name, 'category: dnn') }} || ${{ contains(github.event.pull_request.labels.*.name, 'category: dnn (onnx)') }}"
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-5.x-U20-Cuda.yaml@main
 
 # Vulkan configuration disabled as Vulkan backend for DNN does not support int/int64 for now
 # Details: https://github.com/opencv/opencv/issues/25110
