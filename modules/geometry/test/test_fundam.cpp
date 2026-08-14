@@ -403,13 +403,10 @@ void CV_ComputeEpilinesTest::prepare_to_validation( int /*test_case_idx*/ )
 TEST(Calib3d_ConvertHomogeneoous, accuracy) { CV_ConvertHomogeneousTest test; test.safe_run(); }
 TEST(Calib3d_ComputeEpilines, accuracy) { CV_ComputeEpilinesTest test; test.safe_run(); }
 
-// Regression test for https://github.com/opencv/opencv/issues/4330, fixed by
-// 85149f8686. correctMatches() solves a 6th-degree polynomial whose higher-order
-// coefficients all vanish for this rectified configuration (F has both epipoles
-// at infinity, so the epipolar lines are y = const). cv::solvePoly() used to
-// return garbage roots for such polynomials and correctMatches() emitted
-// NaN / DBL_MAX. Reverting that fix reproduces exactly that, so the checks below
-// are what keeps the issue closed.
+// Regression test for https://github.com/opencv/opencv/issues/4330 (fixed by 85149f8686).
+// Both epipoles of this F are at infinity, which makes the higher-order coefficients of the
+// 6th-degree polynomial correctMatches() solves vanish; cv::solvePoly() used to return
+// garbage roots for that case and correctMatches() emitted NaN / DBL_MAX.
 TEST(Calib3d_FindFundamentalMat, correctMatches)
 {
     double fdata[] = {0, 0, 0, 0, 0, -1, 0, 1, 0};
