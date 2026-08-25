@@ -2774,7 +2774,11 @@ void Net::Impl::collectOrtProfileData() const
     }
 
     // Read the JSON entirely into memory, then parse it from the string.
-    std::ifstream in(profile_path.get());
+    // EndProfiling hands the path back as UTF-8 even on Windows, where the narrow
+    // std::ifstream constructor interprets its argument in the ANSI codepage --
+    // so a profile written under a non-ASCII temp directory would fail to reopen.
+    // toOrtPath() gives us the wide path std::ifstream needs there.
+    std::ifstream in(toOrtPath(profile_path.get()).c_str());
     if (!in.is_open()) {
         CV_LOG_WARNING(NULL, "DNN/ORT: failed to open profile JSON " << profile_path.get());
         return;
