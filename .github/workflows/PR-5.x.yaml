@@ -12,9 +12,13 @@ jobs:
       workflow_branch: 'main'
 
   Linux-no-HAL:
+    needs: Ubuntu2004-x64-OpenVINO
+    if: ${{ !cancelled() }}
     uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-Linux-NoHAL.yaml@main
 
   Linux-Apline:
+    needs: Ubuntu2004-x64-CUDA
+    if: ${{ !cancelled() }}
     uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-Linux-Alpine.yaml@main
 
   Windows:
