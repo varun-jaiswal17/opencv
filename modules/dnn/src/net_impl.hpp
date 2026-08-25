@@ -48,6 +48,24 @@ typedef std::unordered_map<std::string, int64_t> NamesHash;
 
 #ifdef HAVE_ONNXRUNTIME
 struct OrtNamesCache;
+
+// ONNX Runtime spells filesystem paths as ORTCHAR_T, which is wchar_t on Windows
+// and char everywhere else. OpenCV keeps paths as UTF-8 narrow strings on every
+// platform (see cv::tempfile() and utils::fs::getCacheDirectory(), both of which
+// explicitly encode to UTF-8), so a path has to be re-encoded on the way into ORT.
+//
+// The obvious std::wstring(s.begin(), s.end()) shortcut is not that conversion:
+// it sign-extends each individual byte, so any non-ASCII character turns into
+// garbage and the file silently fails to open. Use toOrtPath() instead.
+//
+// OrtPathString matches ORTCHAR_T, so call sites need no #ifdef of their own.
+// Defined in net_impl_backend.cpp.
+#ifdef _WIN32
+typedef std::wstring OrtPathString;
+#else
+typedef std::string OrtPathString;
+#endif
+OrtPathString toOrtPath(const std::string& utf8Path);
 #endif
 
 /** @brief Single entry in a @ref PerfProfile.
