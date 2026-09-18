@@ -575,6 +575,22 @@ void Net::Impl::widenHalfConstants()
     }
 }
 
+// Use count 0 means nothing references it: not a layer input, not a graph output. Bytes a layer
+// still holds in its blobs stay alive until that layer releases them too.
+void Net::Impl::releaseUnusedConsts()
+{
+    if (!mainGraph)
+        return;
+    size_t nargs = args.size();
+    __tensors__.resize(nargs);
+    std::vector<int> usecounts;
+    useCounts(usecounts);
+    for (size_t i = 1; i < nargs; i++) {
+        if (args[i].kind == DNN_ARG_CONST && usecounts[i] == 0)
+            __tensors__[i] = Mat();
+    }
+}
+
 void Net::Impl::prepareForInference()
 {
 #ifdef HAVE_ONNXRUNTIME
@@ -599,6 +615,8 @@ void Net::Impl::prepareForInference()
         fuseScaleSoftmax();
         fuseChains();
         fuseBasic();
+        // fusions run after constFold()/constArgs(), so their orphans have nobody left to free them
+        releaseUnusedConsts();
         totalLayers = updateGraphOfs(mainGraph, 0, true);
         prepared = true;
     }
