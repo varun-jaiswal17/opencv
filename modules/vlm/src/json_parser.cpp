@@ -12,13 +12,11 @@
 
 namespace cv { namespace vlm {
 
-// Recursive descent over the document. Nested inside cv::vlm rather than an unnamed
-// namespace so that JsonValue can befriend it; every member is defined inline, so nothing
-// here gains external linkage.
+// Recursive descent over the document. Every member is inline, so nothing gains external
+// linkage; it sits in cv::vlm rather than an unnamed namespace so JsonValue can befriend it.
 struct JsonBuilder
 {
-    // Guards against a hostile or malformed response recursing the stack to death. Core's
-    // own parsers grew the same limit (see modules/core/src/persistence*.cpp).
+    // Stops a malformed response recursing the stack to death.
     static const int MAX_DEPTH = 64;
 
     const char* begin;
@@ -101,9 +99,8 @@ struct JsonBuilder
         return value;
     }
 
-    // Providers escape non-ASCII as \uXXXX, and anything outside the BMP arrives as a
-    // surrogate pair. An unpaired surrogate becomes U+FFFD so the result is always valid
-    // UTF-8 rather than a byte sequence no consumer can decode.
+    // Anything outside the BMP arrives as a surrogate pair; an unpaired half becomes U+FFFD
+    // so the output is always valid UTF-8.
     unsigned readEscapedCodePoint()
     {
         unsigned cp = readHex4();
@@ -169,9 +166,7 @@ struct JsonBuilder
         }
     }
 
-    // Assembled by hand rather than with strtod, whose decimal separator follows the
-    // process locale -- a caller that set LC_NUMERIC to a comma locale would otherwise
-    // truncate every fractional value in a response.
+    // Assembled by hand: strtod's decimal separator follows the process locale.
     void parseNumber(JsonValue& out)
     {
         bool negative = false;

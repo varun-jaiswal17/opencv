@@ -50,10 +50,8 @@ std::string jsonEscape(const std::string& s)
 
 const char* const REDACTED = "<redacted>";
 
-// Some providers echo the offending credential back in the body of an authentication error,
-// so nothing from a response body reaches an exception message -- which a caller may log --
-// without the key being taken out of it first. The known prefixes cover the case where the
-// provider echoes only part of the key, which an exact match on apiKey would miss.
+// Providers echo the offending credential back in some authentication errors, so no response
+// body reaches an exception message with the key still in it.
 std::string redactSecrets(const std::string& text, const String& apiKey)
 {
     const size_t redactedLen = strlen(REDACTED);
@@ -110,8 +108,6 @@ public:
         : modelType_(modelType), modelName_(modelName), apiKey_(apiKey)
     {
         CV_CheckFalse(apiKey.empty(), "vlm: api_key is required for cloud VLMModelType values");
-        // Deliberately names no model: providers retire names, and a suggestion baked in
-        // here goes stale silently and sends users chasing a 404 that is not their fault.
         CV_CheckFalse(modelName.empty(),
                       "vlm: a model name (model_dir) is required for cloud VLMModelType "
                       "values. Take it from the provider's own model list -- OpenAI and Grok "
