@@ -69,6 +69,7 @@ Mat MappedFile::wrap(const Ptr<MappedFile>& file, int dims, const int* sizes, in
     UMatData* u = new UMatData(&mappedFileAllocator());
     u->data = u->origdata = data;
     u->size = m.total() * m.elemSize();
+    u->flags |= UMatData::USER_ALLOCATED;
     u->userdata = new Ptr<MappedFile>(file);
     m.u = u;
     m.addref();
