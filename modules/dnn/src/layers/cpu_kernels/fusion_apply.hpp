@@ -94,11 +94,16 @@ inline void PreparedFusion::run(Mat& Y) const
         return;
     CV_CheckLE(n, (size_t)INT_MAX, "DNN/fusion: output too large to split");
 
+    // Without nstripes, parallel_for_ makes one stripe per element, and the GCD backend
+    // (macOS) dispatches each stripe as its own task: one task per float. Keep stripes
+    // coarse instead: about 4K elements each, at most 4 per thread.
+    const double nstripes = std::max(1., std::min((double)getNumThreads() * 4, (double)n / 4096.));
+
     if (activationFn) {
         const float* pr = activationParams.empty() ? nullptr : activationParams.data();
         parallel_for_(Range(0, (int)n), [&](const Range& r) {
             activationFn(p + r.start, p + r.start, (size_t)(r.end - r.start), pr);
-        });
+        }, nstripes);
         return;
     }
 
@@ -117,7 +122,7 @@ inline void PreparedFusion::run(Mat& Y) const
             p[k] = fusion::evalElement(g, p[k], bufs, c);
             if (++c == nch) c = 0;
         }
-    });
+    }, nstripes);
 }
 
 CV__DNN_INLINE_NS_END
