@@ -1,0 +1,79 @@
+Patch against 3rdparty/mlas/lib/platform.cpp (after 0002), base ORT v1.26.0 (62f742f).
+
+On x86_64 the MLAS_GEMM_ONLY constructor also selects the NCHWc convolution
+and pooling kernels (ConvNchw / ConvNchwc / ConvDepthwise / ConvPointwise,
+PoolFloatKernel, NchwcBlockSize) used by snchwc.cpp, with the same CPU checks
+as the original constructor kept in the #else branch: SSE2, then AVX, FMA3 and
+AVX-512F (16-channel blocks). It also points LogisticKernelRoutine and
+TanhKernelRoutine at the portable kernels in logistic.cpp and tanh.cpp, which
+activate.cpp uses for fused Sigmoid and Tanh.
+
+diff --git a/3rdparty/mlas/lib/platform.cpp b/3rdparty/mlas/lib/platform.cpp
+index eb2220ac04..d68f962fc3 100644
+--- a/3rdparty/mlas/lib/platform.cpp
++++ b/3rdparty/mlas/lib/platform.cpp
+@@ -308,6 +308,11 @@ MLAS_INTERNAL_DATA MLAS_DECLSPEC_ALIGN(const uint32_t MlasMaskMoveTableLasx[16],
+ // are vendored — the flash-attention path uses the portable C++ rowmax /
+ // sum-exp implementations.
+ //
++// On x86_64 it also selects the NCHWc convolution and pooling kernels read by
++// snchwc.cpp (ConvNchw/ConvNchwc/ConvDepthwise/ConvPointwiseFloatKernel,
++// PoolFloatKernel, NchwcBlockSize), the same way as the original ctor, and the
++// portable logistic/tanh kernels used by activate.cpp.
++//
+ // Every other dispatch field stays at its in-class default (most are
+ // `= nullptr`). Calling any non-SGEMM / non-FlashAttention MLAS API in this
+ // build is undefined.
+@@ -346,6 +351,16 @@ MLAS_PLATFORM::MLAS_PLATFORM(void)
+     this->GemmFloatKernel = MlasGemmFloatKernelSse;
+ #if defined(MLAS_TARGET_AMD64)
+     this->TransposePackB16x4Routine = MlasSgemmTransposePackB16x4Sse;
++    this->ConvNchwFloatKernel = MlasConvNchwFloatKernelSse;
++    this->ConvNchwcFloatKernel = MlasConvNchwcFloatKernelSse;
++    this->ConvDepthwiseFloatKernel = MlasConvDepthwiseFloatKernelSse;
++    this->ConvPointwiseFloatKernel = MlasConvPointwiseFloatKernelSse;
++    this->PoolFloatKernel[MlasMaximumPooling] = MlasPoolMaximumFloatKernelSse;
++    this->PoolFloatKernel[MlasAveragePoolingExcludePad] = MlasPoolAverageExcludePadFloatKernelSse;
++    this->PoolFloatKernel[MlasAveragePoolingIncludePad] = MlasPoolAverageIncludePadFloatKernelSse;
++    this->LogisticKernelRoutine = MlasLogisticKernel;
++    this->TanhKernelRoutine = MlasTanhKernel;
++    this->NchwcBlockSize = 8;
+ #endif
+ 
+     unsigned Cpuid1[4];
+@@ -363,6 +378,13 @@ MLAS_PLATFORM::MLAS_PLATFORM(void)
+             this->KernelM1Routine            = MlasSgemmKernelM1Avx;
+             this->KernelM1TransposeBRoutine  = MlasSgemmKernelM1TransposeBAvx;
+             this->TransposePackB16x4Routine  = MlasSgemmTransposePackB16x4Avx;
++            this->ConvNchwFloatKernel = MlasConvNchwFloatKernelAvx;
++            this->ConvNchwcFloatKernel = MlasConvNchwcFloatKernelAvx;
++            this->ConvDepthwiseFloatKernel = MlasConvDepthwiseFloatKernelAvx;
++            this->ConvPointwiseFloatKernel = MlasConvPointwiseFloatKernelAvx;
++            this->PoolFloatKernel[MlasMaximumPooling] = MlasPoolMaximumFloatKernelAvx;
++            this->PoolFloatKernel[MlasAveragePoolingExcludePad] = MlasPoolAverageExcludePadFloatKernelAvx;
++            this->PoolFloatKernel[MlasAveragePoolingIncludePad] = MlasPoolAverageIncludePadFloatKernelAvx;
+             // FMA3/AVX512F kernels exist for x86_64 only; 32-bit x86 stops at AVX.
+             unsigned Cpuid7[4];
+ #if defined(_WIN32)
+@@ -373,9 +395,21 @@ MLAS_PLATFORM::MLAS_PLATFORM(void)
+             // AVX2 + FMA3.
+             if (((Cpuid1[2] & 0x1000) != 0) && ((Cpuid7[1] & 0x20) != 0)) {
+                 this->GemmFloatKernel = MlasGemmFloatKernelFma3;
++                this->ConvNchwFloatKernel = MlasConvNchwFloatKernelFma3;
++                this->ConvNchwcFloatKernel = MlasConvNchwcFloatKernelFma3;
++                this->ConvDepthwiseFloatKernel = MlasConvDepthwiseFloatKernelFma3;
++                this->ConvPointwiseFloatKernel = MlasConvPointwiseFloatKernelFma3;
+                 // AVX-512F + ZMM-state save.
+                 if (((Cpuid7[1] & 0x10000) != 0) && ((xcr0 & 0xE0) == 0xE0)) {
+                     this->GemmFloatKernel = MlasGemmFloatKernelAvx512F;
++                    this->ConvNchwFloatKernel = MlasConvNchwFloatKernelAvx512F;
++                    this->ConvNchwcFloatKernel = MlasConvNchwcFloatKernelAvx512F;
++                    this->ConvDepthwiseFloatKernel = MlasConvDepthwiseFloatKernelAvx512F;
++                    this->ConvPointwiseFloatKernel = MlasConvPointwiseFloatKernelAvx512F;
++                    this->PoolFloatKernel[MlasMaximumPooling] = MlasPoolMaximumFloatKernelAvx512F;
++                    this->PoolFloatKernel[MlasAveragePoolingExcludePad] = MlasPoolAverageExcludePadFloatKernelAvx512F;
++                    this->PoolFloatKernel[MlasAveragePoolingIncludePad] = MlasPoolAverageIncludePadFloatKernelAvx512F;
++                    this->NchwcBlockSize = 16;
+                 }
+             }
+ #endif // MLAS_TARGET_AMD64
