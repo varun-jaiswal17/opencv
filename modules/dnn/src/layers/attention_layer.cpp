@@ -6,6 +6,7 @@
 #include "cpu_kernels/fast_gemm.hpp"
 #include "cpu_kernels/softmax.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
+#include "cpu_kernels/flash_attention.hpp"
 
 #include <opencv2/dnn/shape_utils.hpp>
 
@@ -403,6 +404,15 @@ class AttentionLayerImpl CV_FINAL : public AttentionLayer {
             {
                 return;  // fast path done; outputs[0] is fully written
             }
+        }
+
+        if (!has_mask && batch_size > 0 && num_heads > 0 && seq_len > 0 &&
+            qkv_head_sizes[0] > 0 && qkv_head_sizes[2] > 0)
+        {
+            flashAttention(Q, K, V, outputs[0].ptr<float>(),
+                           (int)batch_size, (int)num_heads, (int)seq_len, (int)seq_len,
+                           (int)qkv_head_sizes[0], (int)qkv_head_sizes[2], scale);
+            return;
         }
 
         // Compute Softmax(scale * MatMul(Q, K))
