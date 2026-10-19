@@ -246,6 +246,30 @@ TEST_P(Core_FastGemm, thin)
     ASSERT_NO_FATAL_FAILURE(checkGemm(C.ptr<float>(), ld(C), ref, scale, K));
 }
 
+// Without a GEMM HAL the packing is declined; with one, its packed products are checked.
+TEST_P(Core_FastGemm, halPackedB)
+{
+    RNG& rng = theRNG();
+    const int M = 37, N = 90, K = 120;
+    for (int t = 0; t < 4; t++)
+    {
+        const bool ta = (t & 1) != 0, tb = (t & 2) != 0;
+        Mat A = randMat(ta ? K : M, ta ? M : K, rng, 1), B = randMat(tb ? N : K, tb ? K : N, rng, 2);
+        std::vector<uchar> packed;
+        if (!cv::hal::fastGemmHalPackB(tb, N, K, B.ptr<float>(), ld(B), packed))
+        {
+            EXPECT_TRUE(packed.empty());
+            continue;
+        }
+        Mat C = randMat(M, N, rng, 0), ref, scale;
+        refGemm(M, N, K, 1., A.ptr<float>(), ta ? 1 : ld(A), ta ? ld(A) : 1,
+                B.ptr<float>(), tb ? 1 : ld(B), tb ? ld(B) : 1, 1., C.ptr<float>(), ld(C), 1, ref, scale);
+        cv::hal::fastGemmHalPacked(ta, M, N, K, 1.f, A.ptr<float>(), ld(A), packed.data(), 1.f,
+                                   C.ptr<float>(), ld(C), opt);
+        ASSERT_NO_FATAL_FAILURE(checkGemm(C.ptr<float>(), ld(C), ref, scale, K)) << "trans " << ta << tb;
+    }
+}
+
 INSTANTIATE_TEST_CASE_P(/**/, Core_FastGemm, testing::Values(true, false));
 
 }} // namespace

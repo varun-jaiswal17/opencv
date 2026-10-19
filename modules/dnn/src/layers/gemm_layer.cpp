@@ -344,7 +344,15 @@ public:
                 }
             }
 #endif
-            if (!mlas_packed) {
+            // a GEMM HAL plugged into core may pack B its own way; it then computes the products too
+            packed_B_hal.clear();
+            if (!mlas_packed && blobs[0].type() == CV_32F && blobs[0].dims == 2) {
+                const Mat& Bmat = blobs[0];
+                const int N = trans_b ? Bmat.size[0] : Bmat.size[1];
+                const int K = trans_b ? Bmat.size[1] : Bmat.size[0];
+                hal::fastGemmHalPackB(trans_b, N, K, Bmat.ptr<const float>(), Bmat.size[1], packed_B_hal);
+            }
+            if (!mlas_packed && packed_B_hal.empty()) {
                 fastGemmPackB(blobs[0], packed_B, trans_b, opt);
 
                 if (!trans_a && blobs[0].type() == CV_32F) {
@@ -532,6 +540,12 @@ public:
                 }
             }
 #endif
+            if (!packed_B_hal.empty()) {
+                hal::fastGemmHalPacked(trans_a, rows, N, K, alpha, A.ptr<const float>(), na,
+                                       packed_B_hal.data(), 1.f, Y.ptr<float>(), N, opt);
+                fusion.run(Y);
+                return;
+            }
             CV_CheckGT(packed_B.size(), static_cast<size_t>(0), "DNN/Gemm: constant B is not pre-packed");
             if (!thin_packed_B.empty()) {
                 fastGemmThin(rows, N, K, alpha, A.ptr<const float>(), na, 1,
@@ -776,6 +790,7 @@ private:
     bool have_bias;
     std::vector<float> packed_B;
     std::vector<float> thin_packed_B;
+    std::vector<uchar> packed_B_hal;
 #ifdef HAVE_MLAS
     cv::Mat packed_B_mlas;
     int packed_B_mlas_M = 0;

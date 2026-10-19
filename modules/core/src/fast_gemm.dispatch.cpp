@@ -893,6 +893,43 @@ void fastGemmPagedAV(const char *A, const std::vector<const char *> &V, char *Ou
     }
 }
 
+static void fast_gemm_hal_check(int res, const char *name) {
+    if (res != CV_HAL_ERROR_OK)
+        CV_Error_(cv::Error::StsInternal, ("HAL implementation %s returned %d (0x%08x)", name, res, res));
+}
+
+bool fastGemmHalPackB(bool trans_b, int N, int K, const float *B, size_t ldb, std::vector<uchar> &packed) {
+    packed.clear();
+    const int flags = trans_b ? CV_HAL_GEMM_2_T : 0;
+    const size_t step = ldb * sizeof(float);
+    size_t size = 0;
+    int res = cv_hal_gemm32f_packb(B, step, N, K, flags, NULL, &size);
+    if (res == CV_HAL_ERROR_NOT_IMPLEMENTED)
+        return false;
+    fast_gemm_hal_check(res, CVAUX_STR(cv_hal_gemm32f_packb));
+    packed.resize(size);
+    fast_gemm_hal_check(cv_hal_gemm32f_packb(B, step, N, K, flags, packed.data(), &size),
+                        CVAUX_STR(cv_hal_gemm32f_packb));
+    return true;
+}
+
+// Smallest share of a product (in multiply-adds) given to one thread by fastGemmHalPacked.
+static const double FAST_GEMM_HAL_TASK_MACS = 1 << 17;
+
+void fastGemmHalPacked(bool trans_a, int M, int N, int K, float alpha, const float *A, int lda,
+                       const uchar *packed, float beta, float *C, int ldc, const FastGemmOpt &opt) {
+    const int flags = trans_a ? CV_HAL_GEMM_1_T : 0;
+    auto fn = [&](const Range &r) {
+        fast_gemm_hal_check(cv_hal_gemm32f_packed(A, lda * sizeof(float), packed, alpha, beta,
+                                                  C, ldc * sizeof(float), M, N, K, flags, r.start, r.end),
+                            CVAUX_STR(cv_hal_gemm32f_packed));
+    };
+    if (opt.multi_thread)
+        parallel_for_(Range(0, M), fn, (double)M * N * K / FAST_GEMM_HAL_TASK_MACS);
+    else
+        fn(Range(0, M));
+}
+
 // Below this many multiply-adds the older cv::gemm code, with its special cases for
 // 2x2..4x4 and narrow matrices, is faster than packing for the blocked kernels.
 static const int64_t FAST_GEMM_HAL_MIN_MACS = 1 << 15;

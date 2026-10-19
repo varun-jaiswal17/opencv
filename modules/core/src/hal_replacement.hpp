@@ -1099,6 +1099,55 @@ inline int hal_ni_gemm64fc(const double* src1, size_t src1_step, const double* s
 #define cv_hal_gemm64fc hal_ni_gemm64fc
 //! @endcond
 
+//! @addtogroup core_hal_interface_matrix_multiplication
+//! @{
+
+/**
+@brief Packs matrix \f$B\f$, in a layout chosen by the HAL, for repeated products with cv_hal_gemm32f_packed
+(for example the constant weights of a fully connected layer).
+
+OpenCV calls it twice: first with packed == NULL to get the size of the packed matrix, then with a
+buffer of that size. A HAL that packs \f$B\f$ must accept every cv_hal_gemm32f_packed call with it.
+@param src pointer to input \f$k\times n\f$ matrix \f$B\f$, or \f$n\times k\f$ matrix \f$B^T\f$ with CV_HAL_GEMM_2_T, stored in row major order.
+@param src_step number of bytes between two consequent rows of src.
+@param n number of columns in matrix \f$B\f$, equals to number of columns in the product
+@param k number of rows in matrix \f$B\f$
+@param flags 0 or CV_HAL_GEMM_2_T
+@param packed buffer for the packed matrix, or NULL to query its size
+@param packed_size size of the packed matrix in bytes
+ */
+inline int hal_ni_gemm32f_packb(const float* src, size_t src_step, int n, int k, int flags,
+                                uchar* packed, size_t* packed_size) { return CV_HAL_ERROR_NOT_IMPLEMENTED; }
+
+/**
+@brief Computes rows [row_start, row_end) of \f$D = \alpha*AB+\beta*D\f$ with \f$B\f$ packed by cv_hal_gemm32f_packb.
+
+OpenCV splits the rows between its own threads (cv::parallel_for_) and calls the function for each
+range, so the HAL must not start threads of its own.
+@param src1 pointer to input \f$m\times k\f$ matrix \f$A\f$, or \f$k\times m\f$ matrix \f$A^T\f$ with CV_HAL_GEMM_1_T, stored in row major order.
+@param src1_step number of bytes between two consequent rows of src1.
+@param packed matrix \f$B\f$ packed by cv_hal_gemm32f_packb
+@param alpha \f$\alpha\f$ multiplier before \f$AB\f$
+@param beta \f$\beta\f$ multiplier before \f$D\f$; when it is 0 the content of \f$D\f$ is ignored
+@param dst pointer to \f$m\times n\f$ matrix \f$D\f$ stored in row major order.
+@param dst_step number of bytes between two consequent rows of matrix \f$D\f$.
+@param m number of rows in matrix \f$D\f$
+@param n number of columns in matrix \f$D\f$
+@param k number of columns in matrix \f$A\f$
+@param flags 0 or CV_HAL_GEMM_1_T
+@param row_start first row of \f$D\f$ to compute
+@param row_end row after the last one to compute
+ */
+inline int hal_ni_gemm32f_packed(const float* src1, size_t src1_step, const uchar* packed, float alpha, float beta,
+                                 float* dst, size_t dst_step, int m, int n, int k, int flags,
+                                 int row_start, int row_end) { return CV_HAL_ERROR_NOT_IMPLEMENTED; }
+//! @}
+
+//! @cond IGNORED
+#define cv_hal_gemm32f_packb hal_ni_gemm32f_packb
+#define cv_hal_gemm32f_packed hal_ni_gemm32f_packed
+//! @endcond
+
 /**
    @brief Finds the global minimum and maximum in an array.
    @param src_data Source image

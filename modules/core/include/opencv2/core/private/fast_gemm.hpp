@@ -111,6 +111,15 @@ CV_EXPORTS void fastGemmPagedAV(const char *A, const std::vector<const char *> &
                                 size_t B, size_t T_a, size_t Nq, size_t N_k, size_t T_s, size_t D, size_t T_v,
                                 size_t esz, bool canonical_layout, size_t packed_stride, const FastGemmOpt &opt);
 
+// Packs B with the cv_hal_gemm32f_packb HAL. Returns false, leaving packed empty, when no HAL takes
+// it; B packed this way can only be used with fastGemmHalPacked.
+CV_EXPORTS bool fastGemmHalPackB(bool trans_b, int N, int K, const float *B, size_t ldb,
+                                 std::vector<uchar> &packed);
+// C = alpha * op(A) * B + beta * C with B packed by fastGemmHalPackB. The rows are split between
+// OpenCV threads (when opt.multi_thread is set) and the HAL computes each range.
+CV_EXPORTS void fastGemmHalPacked(bool trans_a, int M, int N, int K, float alpha, const float *A, int lda,
+                                  const uchar *packed, float beta, float *C, int ldc, const FastGemmOpt &opt);
+
 // The FP32 fallback of cv::hal::gemm32f, same arguments. Returns false (and touches nothing)
 // for calls it leaves to the older implementation: small products (and products with fewer
 // than 4 rows or a K below 8 that are not large), overlapping buffers, steps that are not a
