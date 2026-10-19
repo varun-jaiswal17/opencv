@@ -541,9 +541,38 @@ void fastGemm(bool trans_a, int M, int N, int K,
     }
 }
 
+// Offers the product to the cv_hal_gemm32f HAL when A and B are row-major matrices or their
+// transposes. Returns true when the HAL computed it.
+static bool fast_gemm_hal(int M, int N, int K, float alpha, const float *A, int lda0, int lda1,
+                          const float *B, int ldb0, int ldb1, float beta, float *C, int ldc) {
+    int flags = 0, m_a = M, n_a = K, lda = lda0, ldb = ldb0;
+    if (lda1 != 1) {
+        if (lda0 != 1)
+            return false;
+        flags |= CV_HAL_GEMM_1_T;
+        m_a = K; n_a = M; lda = lda1;
+    }
+    if (ldb1 != 1) {
+        if (ldb0 != 1)
+            return false;
+        flags |= CV_HAL_GEMM_2_T;
+        ldb = ldb1;
+    }
+    const size_t esz = sizeof(float);
+    int res = cv_hal_gemm32f(A, lda * esz, B, ldb * esz, alpha,
+                             beta != 0.f ? C : NULL, beta != 0.f ? ldc * esz : 0, beta,
+                             C, ldc * esz, m_a, n_a, N, flags);
+    if (res == CV_HAL_ERROR_OK)
+        return true;
+    if (res != CV_HAL_ERROR_NOT_IMPLEMENTED)
+        CV_Error_(cv::Error::StsInternal,
+            ("HAL implementation gemm32f ==> " CVAUX_STR(cv_hal_gemm32f) " returned %d (0x%08x)", res, res));
+    return false;
+}
+
 static void fast_gemm(bool trans_a, bool trans_b, int ma, int na, int mb, int nb,
                       float alpha, const float *A, int lda0, int lda1, const float *B, int ldb0, int ldb1,
-                      float beta, float *C, int ldc, const FastGemmOpt &opt, bool allow_thin) {
+                      float beta, float *C, int ldc, const FastGemmOpt &opt, bool ask_hal, bool allow_thin) {
     const char *a = (const char *)A;
     const char *b = (const char *)B;
     char *c = (char *)C;
@@ -562,6 +591,10 @@ static void fast_gemm(bool trans_a, bool trans_b, int ma, int na, int mb, int nb
     if (allow_thin && !trans_b && ldb1 == 1 && (fastGemmThinEligible(M, N, K) || (uint64_t)M * N * K <= 10000)) {
         return fast_gemm_thin(alpha, beta, M, N, K, a, lda0, lda1, b, ldb0, c, ldc, opt.multi_thread);
     }
+
+    if (ask_hal && opt.multi_thread &&
+        fast_gemm_hal(M, N, K, alpha, A, lda0, lda1, B, ldb0, ldb1, beta, C, ldc))
+        return;
 
 #if CV_TRY_RVV && CV_RVV
     if (opt.use_rvv) {
@@ -608,7 +641,7 @@ static void fast_gemm(bool trans_a, bool trans_b, int ma, int na, int mb, int nb
 void fastGemm(bool trans_a, bool trans_b, int ma, int na, int mb, int nb,
               float alpha, const float *A, int lda0, int lda1, const float *B, int ldb0, int ldb1,
               float beta, float *C, int ldc, const FastGemmOpt &opt) {
-    fast_gemm(trans_a, trans_b, ma, na, mb, nb, alpha, A, lda0, lda1, B, ldb0, ldb1, beta, C, ldc, opt, true);
+    fast_gemm(trans_a, trans_b, ma, na, mb, nb, alpha, A, lda0, lda1, B, ldb0, ldb1, beta, C, ldc, opt, true, true);
 }
 
 
@@ -639,6 +672,19 @@ void fastGemmBatch(size_t batch, const size_t *A_offsets, const size_t *B_offset
                                b + B_offsets[i] * esz, ldb0,
                                c + C_offsets[i] * esz, ldc, opt.multi_thread);
             }
+        }
+        return;
+    }
+
+    // a top-level batch is offered to the cv_hal_gemm32f HAL one matrix at a time
+    if (opt.multi_thread && batch > 0 &&
+        fast_gemm_hal(M, N, K, alpha, A + A_offsets[0], lda0, lda1, B + B_offsets[0], ldb0, ldb1,
+                      beta, C + C_offsets[0], ldc)) {
+        for (size_t i = 1; i < batch; i++) {
+            if (!fast_gemm_hal(M, N, K, alpha, A + A_offsets[i], lda0, lda1, B + B_offsets[i], ldb0, ldb1,
+                               beta, C + C_offsets[i], ldc))
+                fast_gemm(false, false, M, K, K, N, alpha, A + A_offsets[i], lda0, lda1,
+                          B + B_offsets[i], ldb0, ldb1, beta, C + C_offsets[i], ldc, opt, false, true);
         }
         return;
     }
@@ -907,7 +953,7 @@ bool fastGemm32f(const float* src1, size_t src1_step, const float* src2, size_t 
     // the blocked kernels pack it tile by tile in parallel.
     fast_gemm(trans_a, trans_b, m_a, n_a, mb, nb, alpha,
               src1, (int)(src1_step / esz), 1, src2, (int)(src2_step / esz), 1,
-              use_c ? beta : 0.f, dst, (int)(dst_step / esz), opt, false);
+              use_c ? beta : 0.f, dst, (int)(dst_step / esz), opt, false, false);
     return true;
 }
 

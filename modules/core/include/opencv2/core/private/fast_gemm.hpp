@@ -79,7 +79,9 @@ CV_EXPORTS void fastGemm(bool trans_a, int M, int N, int K,
                          const float *packed_B, float beta,
                          float *C, int ldc, const FastGemmOpt &opt);
 
-// C = alpha * op(A) * op(B) + beta * C
+// C = alpha * op(A) * op(B) + beta * C. When opt.multi_thread is set (a top-level call, not
+// one made from inside a parallel_for_ worker), the cv_hal_gemm32f HAL is asked first;
+// fastGemmBatch offers it each matrix of the batch in the same way.
 CV_EXPORTS void fastGemm(bool trans_a, bool trans_b, int ma, int na, int mb, int nb,
                          float alpha, const float *A, int lda0, int lda1,
                          const float *B, int ldb0, int ldb1,
