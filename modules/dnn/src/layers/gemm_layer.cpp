@@ -344,7 +344,7 @@ public:
                 }
             }
 #endif
-            // a GEMM HAL plugged into core may pack B its own way; it then computes the products too
+            // a HAL that packs B also computes the products with it
             packed_B_hal.clear();
             if (!mlas_packed && blobs[0].type() == CV_32F && blobs[0].dims == 2) {
                 const Mat& Bmat = blobs[0];

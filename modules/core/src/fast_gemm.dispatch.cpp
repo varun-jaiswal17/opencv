@@ -541,8 +541,6 @@ void fastGemm(bool trans_a, int M, int N, int K,
     }
 }
 
-// Offers the product to the cv_hal_gemm32f HAL when A and B are row-major matrices or their
-// transposes. Returns true when the HAL computed it.
 static bool fast_gemm_hal(int M, int N, int K, float alpha, const float *A, int lda0, int lda1,
                           const float *B, int ldb0, int ldb1, float beta, float *C, int ldc) {
     int flags = 0, m_a = M, n_a = K, lda = lda0, ldb = ldb0;
@@ -676,7 +674,6 @@ void fastGemmBatch(size_t batch, const size_t *A_offsets, const size_t *B_offset
         return;
     }
 
-    // a top-level batch is offered to the cv_hal_gemm32f HAL one matrix at a time
     if (opt.multi_thread && batch > 0 &&
         fast_gemm_hal(M, N, K, alpha, A + A_offsets[0], lda0, lda1, B + B_offsets[0], ldb0, ldb1,
                       beta, C + C_offsets[0], ldc)) {
@@ -913,7 +910,6 @@ bool fastGemmHalPackB(bool trans_b, int N, int K, const float *B, size_t ldb, st
     return true;
 }
 
-// Smallest share of a product (in multiply-adds) given to one thread by fastGemmHalPacked.
 static const double FAST_GEMM_HAL_TASK_MACS = 1 << 17;
 
 void fastGemmHalPacked(bool trans_a, int M, int N, int K, float alpha, const float *A, int lda,
@@ -930,11 +926,9 @@ void fastGemmHalPacked(bool trans_a, int M, int N, int K, float alpha, const flo
         fn(Range(0, M));
 }
 
-// Below this many multiply-adds the older cv::gemm code, with its special cases for
-// 2x2..4x4 and narrow matrices, is faster than packing for the blocked kernels.
+// below this the older cv::gemm code is faster than packing for the blocked kernels
 static const int64_t FAST_GEMM_HAL_MIN_MACS = 1 << 15;
-// With fewer than 4 rows or a K below 8 the product needs this much work before packing and
-// waking the threads pay off.
+// few-row or small-K products need this much work before packing pays off
 static const int64_t FAST_GEMM_HAL_MIN_THIN_MACS = 1 << 19;
 
 static bool fast_gemm_overlap(const void *p0, size_t size0, const void *p1, size_t size1) {
@@ -969,7 +963,6 @@ bool fastGemm32f(const float* src1, size_t src1_step, const float* src2, size_t 
         const int mc = trans_c ? N : M, nc = trans_c ? M : N;
         if (fast_gemm_overlap(dst, d_size, src3, (mc - 1) * src3_step + nc * esz))
             return false;
-        // dst = op(C); the product is then accumulated into dst with beta
         for (int i = 0; i < M; i++) {
             float *d = (float *)((uchar *)dst + i * dst_step);
             if (trans_c) {
@@ -986,8 +979,7 @@ bool fastGemm32f(const float* src1, size_t src1_step, const float* src2, size_t 
 
     FastGemmOpt opt;
     opt.init();
-    // B is used once, so the few-row path, which packs all of B on one thread, is skipped:
-    // the blocked kernels pack it tile by tile in parallel.
+    // the few-row path packs all of B on one thread; the blocked kernels pack it in parallel
     fast_gemm(trans_a, trans_b, m_a, n_a, mb, nb, alpha,
               src1, (int)(src1_step / esz), 1, src2, (int)(src2_step / esz), 1,
               use_c ? beta : 0.f, dst, (int)(dst_step / esz), opt, false, false);

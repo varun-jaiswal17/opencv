@@ -1103,11 +1103,7 @@ inline int hal_ni_gemm64fc(const double* src1, size_t src1_step, const double* s
 //! @{
 
 /**
-@brief Packs matrix \f$B\f$, in a layout chosen by the HAL, for repeated products with cv_hal_gemm32f_packed
-(for example the constant weights of a fully connected layer).
-
-OpenCV calls it twice: first with packed == NULL to get the size of the packed matrix, then with a
-buffer of that size. A HAL that packs \f$B\f$ must accept every cv_hal_gemm32f_packed call with it.
+@brief Packs matrix \f$B\f$ in a HAL layout for cv_hal_gemm32f_packed, which must then accept every product with it.
 @param src pointer to input \f$k\times n\f$ matrix \f$B\f$, or \f$n\times k\f$ matrix \f$B^T\f$ with CV_HAL_GEMM_2_T, stored in row major order.
 @param src_step number of bytes between two consequent rows of src.
 @param n number of columns in matrix \f$B\f$, equals to number of columns in the product
@@ -1120,10 +1116,7 @@ inline int hal_ni_gemm32f_packb(const float* src, size_t src_step, int n, int k,
                                 uchar* packed, size_t* packed_size) { return CV_HAL_ERROR_NOT_IMPLEMENTED; }
 
 /**
-@brief Computes rows [row_start, row_end) of \f$D = \alpha*AB+\beta*D\f$ with \f$B\f$ packed by cv_hal_gemm32f_packb.
-
-OpenCV splits the rows between its own threads (cv::parallel_for_) and calls the function for each
-range, so the HAL must not start threads of its own.
+@brief Computes rows [row_start, row_end) of \f$D = \alpha*AB+\beta*D\f$ with \f$B\f$ packed by cv_hal_gemm32f_packb; OpenCV owns the threads.
 @param src1 pointer to input \f$m\times k\f$ matrix \f$A\f$, or \f$k\times m\f$ matrix \f$A^T\f$ with CV_HAL_GEMM_1_T, stored in row major order.
 @param src1_step number of bytes between two consequent rows of src1.
 @param packed matrix \f$B\f$ packed by cv_hal_gemm32f_packb

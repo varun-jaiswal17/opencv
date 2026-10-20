@@ -47,8 +47,7 @@
 #define FAST_GEMM_F32_NR 12
 #endif
 
-// Narrowest column tile when a GEMM is split between threads. On AVX2 it stays at the
-// 32 columns the split was tuned with on the 12 x 8 kernel.
+// narrowest column tile when the work is split between threads
 #if CV_AVX2
 #define FAST_GEMM_F32_MIN_SPLIT_NC 32
 #else
@@ -347,13 +346,11 @@ static inline void fast_gemm8x12_f32(int k, const char *a_, const char *b_,
 #undef FAST_GEMM_FINALE
 }
 
-#elif CV_AVX2 // AVX2 with FMA3 (16 x 256-bit registers)
+#elif CV_AVX2 // AVX2 (16 x 256-bit registers)
 
 FAST_GEMM_IMPLEMENT_PACK(6, _f32, float, float) // a packer
 FAST_GEMM_IMPLEMENT_PACK(16, _f32, float, float) // b packer
 
-// 6 x 16 tile: each step of k does 12 FMAs with 2 loads of B and 6 broadcasts of A,
-// where the 12 x 8 tile below needs 1 load of B and 12 broadcasts of A.
 static inline void fast_gemm6x16_f32(int k, const char *a_, const char *b_, char *c_, int ldc, float alpha) {
     const float* a = (const float*)a_;
     const float* b = (const float*)b_;

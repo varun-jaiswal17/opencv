@@ -9,8 +9,7 @@
 
 namespace cv { namespace dnn {
 
-// out = softmax(scale * Q * K^T) * V, computed tile by tile without the full score matrix.
-// Q: [B*H, Sq, D], K: [B*H, Skv, D], V: [B*H, Skv, Dv], out: [B, Sq, H, Dv].
+// Q: [B*H, Sq, D], K: [B*H, Skv, D], V: [B*H, Skv, Dv], out: [B, Sq, H, Dv]
 void flashAttention(const float* Q, const float* K, const float* V, float* out,
                     int B, int H, int Sq, int Skv, int D, int Dv, float scale);
 

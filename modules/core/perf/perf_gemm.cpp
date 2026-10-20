@@ -114,7 +114,7 @@ PERF_TEST_P(GemmTest, gemmN1,
     GemmTest::runGemmTest(GetParam());
 }
 
-// Transformer shapes (DeiT-Tiny, 197 tokens): QKV projection, MLP fc1, MLP fc2, attention scores
+// DeiT-Tiny shapes
 PERF_TEST_P(GemmTest, gemmTransformer,
             testing::Combine(
                 testing::Values(
