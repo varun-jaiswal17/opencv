@@ -169,6 +169,32 @@ if(MLAS_X86_64)
                               PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -mf16c")
   set_source_files_properties(${MLAS_SRC_DIR}/x86_64/SgemmKernelAvx512F.S
                               PROPERTIES COMPILE_FLAGS "-mavx512f")
+
+  list(APPEND mlas_platform_srcs
+    ${MLAS_SRC_DIR}/snchwc.cpp
+    ${MLAS_SRC_DIR}/reorder.cpp
+    ${MLAS_SRC_DIR}/activate.cpp
+    ${MLAS_SRC_DIR}/logistic.cpp
+    ${MLAS_SRC_DIR}/tanh.cpp
+    ${MLAS_SRC_DIR}/x86_64/SconvKernelSse2.S
+    ${MLAS_SRC_DIR}/x86_64/SconvKernelAvx.S
+    ${MLAS_SRC_DIR}/x86_64/SconvKernelFma3.S
+    ${MLAS_SRC_DIR}/x86_64/SconvKernelAvx512F.S
+    ${MLAS_SRC_DIR}/x86_64/SpoolKernelSse2.S
+    ${MLAS_SRC_DIR}/x86_64/SpoolKernelAvx.S
+    ${MLAS_SRC_DIR}/x86_64/SpoolKernelAvx512F.S
+  )
+  set_source_files_properties(${MLAS_SRC_DIR}/x86_64/SconvKernelSse2.S
+                              ${MLAS_SRC_DIR}/x86_64/SpoolKernelSse2.S
+                              PROPERTIES COMPILE_FLAGS "-msse2")
+  set_source_files_properties(${MLAS_SRC_DIR}/x86_64/SconvKernelAvx.S
+                              ${MLAS_SRC_DIR}/x86_64/SpoolKernelAvx.S
+                              PROPERTIES COMPILE_FLAGS "-mavx")
+  set_source_files_properties(${MLAS_SRC_DIR}/x86_64/SconvKernelFma3.S
+                              PROPERTIES COMPILE_FLAGS "-mavx2 -mfma")
+  set_source_files_properties(${MLAS_SRC_DIR}/x86_64/SconvKernelAvx512F.S
+                              ${MLAS_SRC_DIR}/x86_64/SpoolKernelAvx512F.S
+                              PROPERTIES COMPILE_FLAGS "-mavx512f")
 endif()
 
 # i386 / 32-bit x86 SGEMM kernels.

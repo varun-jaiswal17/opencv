@@ -36,6 +36,23 @@ Source files imported verbatim from upstream:
   typedefs, harmless under FP32-only builds.
 - Per-arch SGEMM kernels under `lib/<arch>/`.
 
+x86_64 only, the NCHWc convolution (`MlasNchwcConv`) from the same upstream
+commit, built only inside `if(MLAS_X86_64)` in `CMakeLists.txt`:
+
+- `lib/snchwc.cpp` — `MlasNchwcConv` / `MlasNchwcPool` and their threading.
+- `lib/reorder.cpp` — filter and tensor reorders between plain and NCHWc
+  layouts (`MlasReorderFilterOIHWBiBo`, `MlasReorderFilterOIHWBo`, ...).
+- `lib/activate.cpp`, `lib/logistic.cpp`, `lib/tanh.cpp` — `MlasActivation`,
+  which `snchwc.cpp` calls for activations the conv kernels do not apply
+  themselves. `logistic.cpp` and `tanh.cpp` run their portable kernels; the
+  per-arch logistic / tanh kernels are not vendored.
+- `lib/x86_64/SconvKernel{Sse2,Avx,Fma3,Avx512F}.S`,
+  `lib/x86_64/SconvKernel{Common,AvxCommon}.h` — the convolution kernels
+  (NCHWc, NCHW input, depthwise, pointwise).
+- `lib/x86_64/SpoolKernel{Sse2,Avx,Avx512F}.S`,
+  `lib/x86_64/SpoolKernel{Common,AvxCommon}.h` — the pooling kernels, which
+  `snchwc.cpp` dispatches to as well.
+
 Top-level layout:
 
 - `inc/` — public MLAS headers (kept verbatim from upstream).
@@ -93,6 +110,11 @@ re-vendor. The unified-diff form of each in-tree edit lives under
 5. `lib/core/common/{narrow,common}.h` — minimal shims for ORT internals
    that MLAS calls (not present upstream as MLAS sources, only as ORT
    includes). These are new files, not edits — no `.diff` needed.
+6. `lib/platform.cpp` — on x86_64 the `MLAS_GEMM_ONLY` ctor also selects the
+   NCHWc conv and pooling kernels and `NchwcBlockSize` with the original
+   ctor's CPU checks (8-channel blocks up to FMA3, 16 with AVX-512F), and the
+   portable logistic / tanh kernels. See
+   `patches/0008-platform-nchwc-x86_64.diff`.
 
 ## Build flags
 

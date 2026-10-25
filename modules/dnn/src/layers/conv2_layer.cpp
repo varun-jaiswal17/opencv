@@ -8,6 +8,7 @@
 #include "layers_common.hpp"
 #include "conv2_common.hpp"
 #include "cpu_kernels/mlas_gemm.hpp"
+#include "cpu_kernels/mlas_nchwc_conv.hpp"
 #include "opencv2/core/hal/intrin.hpp"
 #include <algorithm>
 #include <cstring>
@@ -158,6 +159,7 @@ public:
         float* bp = bias.ptr<float>();
         for (int k = 0; k < K; k++)
             bp[k] += adj[k];
+        resetMlasNchwc();
         return true;
     }
 
@@ -245,6 +247,7 @@ public:
 
         wshape0 = weights_.shape();
         packC0 = C0;
+        resetMlasNchwc();
 #ifdef HAVE_CUDA
         // Retain the original NCHW filter for the CUDA (cuDNN) path.
         weights_.convertTo(origWeights, CV_32F);
@@ -629,6 +632,7 @@ public:
             activParams = ap;
         }
         addResidual = takesResidual;
+        resetMlasNchwc();
         return true;
     }
 
@@ -784,6 +788,12 @@ public:
         void* outptr = out.data;
         const void* wptr = weights.data;
 
+        if (mlasNchwcEligible(inptype, inpshape, dynamicWeights)) {
+            forwardMlasNchwc(inp, (const float*)resptr, out, bias_data);
+            if (uouts) out.copyTo(uouts->at(0));
+            return;
+        }
+
         // MLAS 1x1 SGEMM path. Skipped for small spatial: the gather/scatter
         // tax exceeds MLAS's SGEMM speedup over the in-place NCHWc8 kernel.
         if (mlas1x1Enabled() && inptype == CV_32F &&
@@ -814,6 +824,128 @@ public:
             // very rare situation of dynamic convolution weights,
             // we release temporarily allocated and reordered copy of the weights
             weights.release();
+        }
+    }
+
+    void resetMlasNchwc()
+    {
+        mlas_nchwc_filter_.clear();
+        mlas_nchwc_state_ = 0;
+    }
+
+    bool mlasNchwcEligible(int inptype, const MatShape& inpshape, bool dynamicWeights)
+    {
+        const MlasNchwcMode mode = mlasNchwcMode();
+        if (mode == MLAS_NCHWC_OFF || mlas_nchwc_state_ < 0 || dynamicWeights)
+            return false;
+        const int C0 = inpshape.back();
+        if (inptype != CV_32F || weights.type() != CV_32F || cs.nspatialdims != 2 ||
+            wshape0.dims != 4 || packC0 != C0 || !mlasNchwcAvailable(C0))
+            return false;
+        if (fastActivation == FAST_ACTIV_PRELU || (!activ.empty() && !activationFunc))
+            return false;
+        const int C = inpshape.channels(), K = wshape0[0], Cg = wshape0[1];
+        if (cs.depthwise ? C % C0 != 0 : (Cg % C0 != 0 || (K / ngroups) % C0 != 0))
+            return false;
+        if (mode == MLAS_NCHWC_AUTO) {
+            const bool strided = cs.strides[1] > 1 || cs.strides[2] > 1;
+            const bool pointwise = cs.kshape[1] == 1 && cs.kshape[2] == 1;
+            if (!cs.depthwise && ngroups == 1 && !(strided && !pointwise))
+                return false;
+        }
+        if (mlas_nchwc_state_ == 0)
+            mlas_nchwc_state_ = packMlasNchwcFilter() ? 1 : -1;
+        return mlas_nchwc_state_ > 0;
+    }
+
+    bool packMlasNchwcFilter()
+    {
+        const int K = wshape0[0], Cg = wshape0[1], kh = wshape0[2], kw = wshape0[3];
+        const int ksize = kh * kw;
+        const float* W = weights.ptr<float>();
+        const MatShape ws = weights.shape();
+        std::vector<float> plain((size_t)K * Cg * ksize);
+        if (cs.depthwise) {
+            const int C0 = ws[2];
+            CV_Assert(ws[1] == ksize);
+            for (int ch = 0; ch < K; ch++)
+                for (int i = 0; i < ksize; i++)
+                    plain[(size_t)ch * ksize + i] = W[((size_t)(ch / C0) * ksize + i) * C0 + ch % C0];
+        } else {
+            const ConvWeightPack pack = ConvWeightPack::forConv(wshape0, ws, ngroups, packC0);
+            CV_Assert(pack.ksize == ksize);
+            const size_t sstride = pack.tapStride();
+            for (int k = 0; k < K; k++)
+                for (int c = 0; c < Cg; c++) {
+                    const float* w = W + pack.offset(k, c);
+                    float* dst = &plain[((size_t)k * Cg + c) * ksize];
+                    for (int i = 0; i < ksize; i++)
+                        dst[i] = w[i * sstride];
+                }
+        }
+        if (fusedBatchNorm) {
+            const float* sc = fusedScale.ptr<float>();
+            const size_t per_k = (size_t)Cg * ksize;
+            for (int k = 0; k < K; k++)
+                for (size_t j = 0; j < per_k; j++)
+                    plain[k * per_k + j] *= sc[k];
+        }
+        return mlasNchwcPackFilter(plain.data(), K, Cg, kh, kw, cs.depthwise, mlas_nchwc_filter_);
+    }
+
+    void forwardMlasNchwc(const Mat& inp, const float* residual, Mat& out, const float* biasptr)
+    {
+        const MatShape inpshape = inp.shape(), outshape = out.shape();
+        MlasNchwcConvParams p;
+        p.N = inpshape[0];
+        p.C = inpshape.channels();
+        p.H = inpshape[2];
+        p.W = inpshape[3];
+        p.K = outshape.channels();
+        p.Ho = outshape[2];
+        p.Wo = outshape[3];
+        p.kh = cs.kshape[1];
+        p.kw = cs.kshape[2];
+        p.strides[0] = cs.strides[1];
+        p.strides[1] = cs.strides[2];
+        p.dilations[0] = cs.dilations[1];
+        p.dilations[1] = cs.dilations[2];
+        p.pads[0] = cs.pads[1];
+        p.pads[1] = cs.pads[2];
+        p.pads[2] = cs.pads[1 + ConvState::MAX_CONV_DIMS];
+        p.pads[3] = cs.pads[2 + ConvState::MAX_CONV_DIMS];
+        p.groups = ngroups;
+        p.activParams[0] = p.activParams[1] = 0.f;
+        switch (fastActivation) {
+        case FAST_ACTIV_RELU:
+            p.activation = MLAS_NCHWC_ACTIV_RELU;
+            break;
+        case FAST_ACTIV_LEAKY_RELU:
+            p.activation = MLAS_NCHWC_ACTIV_LEAKY_RELU;
+            p.activParams[0] = activParams[0];
+            break;
+        case FAST_ACTIV_CLIP:
+            p.activation = MLAS_NCHWC_ACTIV_CLIP;
+            p.activParams[0] = activParams[0];
+            p.activParams[1] = activParams[1];
+            break;
+        default:
+            p.activation = MLAS_NCHWC_ACTIV_NONE;
+        }
+
+        float* outptr = out.ptr<float>();
+        if (residual)
+            std::memcpy(outptr, residual, out.total() * sizeof(float));
+        CV_Assert(mlasNchwcConv(p, inp.ptr<float>(), mlas_nchwc_filter_.data(), biasptr,
+                                outptr, residual != nullptr));
+
+        if (activationFunc) {
+            const size_t total = out.total();
+            const float* ap = activParams.empty() ? nullptr : activParams.data();
+            parallel_for_(Range(0, (int)((total + 4095) / 4096)), [&](const Range& r) {
+                const size_t start = (size_t)r.start * 4096, end = std::min(total, (size_t)r.end * 4096);
+                activationFunc(outptr + start, outptr + start, end - start, ap);
+            });
         }
     }
 
@@ -1126,6 +1258,9 @@ public:
     Mat scratch_C_;
     int mlas_packed_M_ = 0;   // == Cout
     int mlas_packed_K_ = 0;   // == Cin
+
+    std::vector<float> mlas_nchwc_filter_;
+    int mlas_nchwc_state_ = 0;
 };
 
 Ptr<Conv2Layer> Conv2Layer::create(const LayerParams& params)
