@@ -95,6 +95,77 @@ struct ConstFolding
         }
     }
 
+    // Folding materialises an op's result as one constant tensor and drops its inputs.
+    // That is a win when the result is no bigger than what it replaces, and a loss when
+    // it is much bigger -- the LoRA case, where base + (A @ B) * scale folds a pair of
+    // low-rank factors into a full-rank weight and throws away the reason LoRA is small.
+    //
+    // Skipped only when the result is both large in absolute terms and much larger than
+    // its inputs, so ordinary graphs (whose folds are small) are untouched. Tunable with
+    // OPENCV_DNN_CONSTFOLD_MIN_BYTES and OPENCV_DNN_CONSTFOLD_MAX_GROWTH; growth 0
+    // restores unconditional folding.
+    static size_t foldMinBytes()
+    {
+        static const size_t v = (size_t)utils::getConfigurationParameterSizeT(
+            "OPENCV_DNN_CONSTFOLD_MIN_BYTES", (size_t)16 << 20);
+        return v;
+    }
+
+    static double foldMaxGrowth()
+    {
+        static const double v = utils::getConfigurationParameterSizeT(
+            "OPENCV_DNN_CONSTFOLD_MAX_GROWTH", 4);
+        return v;
+    }
+
+    static size_t shapeBytes(const MatShape& shape, int type)
+    {
+        return type < 0 ? 0 : shape.total() * CV_ELEM_SIZE(type);
+    }
+
+    bool foldInflatesMemory(const Ptr<LayerInfo>& layer,
+                            const std::vector<MatShape>& inpShapes,
+                            const std::vector<int>& inpTypes,
+                            size_t noutputs) const
+    {
+        const double growth = foldMaxGrowth();
+        if (growth <= 0)
+            return false;
+
+        std::vector<MatShape> outShapes, tempShapes;
+        std::vector<int> outTypes, tempTypes;
+        try {
+            layer->getMemoryShapes(inpShapes, (int)noutputs, outShapes, tempShapes);
+            layer->getTypes(inpTypes, (int)noutputs, (int)tempShapes.size(), outTypes, tempTypes);
+        } catch (const cv::Exception& e) {
+            CV_UNUSED(e);
+            return false;   // can't size it -> fold as before
+        }
+        if (outShapes.size() != noutputs || outTypes.size() != noutputs)
+            return false;
+
+        size_t outBytes = 0, inpBytes = 0;
+        for (size_t k = 0; k < noutputs; k++) {
+            if (outShapes[k].hasSymbols())
+                return false;
+            outBytes += shapeBytes(outShapes[k], outTypes[k]);
+        }
+        for (size_t k = 0; k < inpShapes.size(); k++)
+            inpBytes += shapeBytes(inpShapes[k], inpTypes[k]);
+
+        if (outBytes < foldMinBytes())
+            return false;
+        if ((double)outBytes <= (double)inpBytes * growth)
+            return false;
+
+        CV_LOG_INFO(NULL, cv::format(
+            "DNN/ConstFold: skipping fold of '%s' (%s): %.1f MiB out vs %.1f MiB in (%.1fx)",
+            layer->name.c_str(), layer->type.c_str(),
+            outBytes / 1048576.0, inpBytes / 1048576.0,
+            inpBytes ? (double)outBytes / (double)inpBytes : 0.0));
+        return true;
+    }
+
     bool processGraph(Ptr<Graph>& graph)
     {
         netimpl->scratchBufs.clear();
@@ -150,7 +221,11 @@ struct ConstFolding
             if (fold_shape)
                 inpMats[0] = Mat(inpShapes[0], inpTypes[0], (void*)nullptr);
 
-            if ((all_const || fold_shape) /*&&
+            // A Shape fold is a handful of ints; only real tensor folds can inflate.
+            const bool skip_fold = all_const && !fold_shape &&
+                                   foldInflatesMemory(layer, inpShapes, inpTypes, noutputs);
+
+            if ((all_const || fold_shape) && !skip_fold /*&&
                 op->supportBlockLayout(0, (int)ninputs) <= 0 // we don't currently support constant folding
                                                // for block-layout operations (Convolution, MaxPool, AveragePool)
                 */) {
