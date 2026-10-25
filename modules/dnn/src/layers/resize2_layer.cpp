@@ -1039,7 +1039,10 @@ public:
                          std::vector<MatShape> &internals) const CV_OVERRIDE
     {
         size_t ninputs = inputs.size();
-        CV_Assert(ninputs == 1 || ninputs == 2 || ninputs >= 4);
+        // 3 inputs is the legal (X, roi, scales) form ONNX permits and PyTorch emits
+        // for F.interpolate(scale_factor=...); the dispatch below already reads
+        // scales from inputs[2] when there is no sizes input.
+        CV_Assert(ninputs >= 1 && ninputs <= 4);
         outputs.resize(1, inputs[0]);
 
         // Rank-3 (N,C,W): 1-D resize of the W axis; width baked into params, stays rank-3.
