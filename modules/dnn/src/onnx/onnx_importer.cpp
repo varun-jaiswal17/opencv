@@ -49,29 +49,48 @@ CV__DNN_INLINE_NS_BEGIN
 
 #ifdef HAVE_PROTOBUF
 
-// Resolve an engine request to a concrete supported engine (ENGINE_OPENCV or ENGINE_ORT).
+// Resolve an engine request to a concrete supported engine (ENGINE_OPENCV, ENGINE_ORT or ENGINE_OPENVINO).
 // ENGINE_AUTO resolves to ENGINE_OPENCV. The OPENCV_FORCE_DNN_ENGINE override, when set to a
 // concrete engine, wins over the caller's choice; left unset (ENGINE_AUTO) it does not force.
 static int resolveOnnxEngine(int engine)
 {
     static const int engine_forced =
         (int)utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", ENGINE_AUTO);
-    if (engine_forced == ENGINE_OPENCV || engine_forced == ENGINE_ORT)
+    if (engine_forced == ENGINE_OPENCV || engine_forced == ENGINE_ORT || engine_forced == ENGINE_OPENVINO)
         engine = engine_forced;
     if (engine == ENGINE_AUTO)
         engine = ENGINE_OPENCV;
-    if (engine != ENGINE_OPENCV && engine != ENGINE_ORT)
+    if (engine != ENGINE_OPENCV && engine != ENGINE_ORT && engine != ENGINE_OPENVINO)
     {
-        CV_LOG_WARNING(NULL, "DNN/ONNX: only ENGINE_AUTO, ENGINE_OPENCV and ENGINE_ORT are supported; "
+        CV_LOG_WARNING(NULL, "DNN/ONNX: only ENGINE_AUTO, ENGINE_OPENCV, ENGINE_ORT and ENGINE_OPENVINO are supported; "
                              "falling back to ENGINE_OPENCV.");
         engine = ENGINE_OPENCV;
     }
     return engine;
 }
 
+#ifndef HAVE_INF_ENGINE
+// Also printed for WITH_OPENVINO=ON when OpenVINO is built as a DNN plugin (DNN_PLUGIN_LIST):
+// the plugin provides DNN_BACKEND_INFERENCE_ENGINE, but not the engine.
+static void warnNoOpenVINOEngine()
+{
+    CV_LOG_WARNING(NULL, "DNN/ONNX/OpenVINO: OpenCV was built without OpenVINO in the dnn module "
+                         "(WITH_OPENVINO=OFF, or OpenVINO built as a DNN plugin). Falling back to ENGINE_OPENCV.");
+}
+#endif
+
 Net readNetFromONNX(const String& onnxFile, int engine, bool mapExternalData)
 {
-    if (resolveOnnxEngine(engine) == ENGINE_ORT)
+    const int resolved = resolveOnnxEngine(engine);
+    if (resolved == ENGINE_OPENVINO)
+    {
+#ifdef HAVE_INF_ENGINE
+        return readNetFromONNX2_OpenVINO(onnxFile);
+#else
+        warnNoOpenVINOEngine();
+#endif
+    }
+    if (resolved == ENGINE_ORT)
     {
 #ifdef HAVE_ONNXRUNTIME
         Net net = readNetFromONNX2_ORT(onnxFile);
@@ -94,7 +113,16 @@ Net readNetFromONNX(const String& onnxFile, int engine)
 
 Net readNetFromONNX(const char* buffer, size_t sizeBuffer, int engine)
 {
-    if (resolveOnnxEngine(engine) == ENGINE_ORT)
+    const int resolved = resolveOnnxEngine(engine);
+    if (resolved == ENGINE_OPENVINO)
+    {
+#ifdef HAVE_INF_ENGINE
+        CV_Error(Error::StsNotImplemented, "DNN/ONNX/OpenVINO: loading from memory buffer is not supported");
+#else
+        warnNoOpenVINOEngine();
+#endif
+    }
+    if (resolved == ENGINE_ORT)
     {
 #ifdef HAVE_ONNXRUNTIME
         CV_Error(Error::StsNotImplemented, "DNN/ONNX/ORT: loading from memory buffer is not supported");
@@ -107,7 +135,16 @@ Net readNetFromONNX(const char* buffer, size_t sizeBuffer, int engine)
 
 Net readNetFromONNX(const std::vector<uchar>& buffer, int engine)
 {
-    if (resolveOnnxEngine(engine) == ENGINE_ORT)
+    const int resolved = resolveOnnxEngine(engine);
+    if (resolved == ENGINE_OPENVINO)
+    {
+#ifdef HAVE_INF_ENGINE
+        CV_Error(Error::StsNotImplemented, "DNN/ONNX/OpenVINO: loading from memory buffer is not supported");
+#else
+        warnNoOpenVINOEngine();
+#endif
+    }
+    if (resolved == ENGINE_ORT)
     {
 #ifdef HAVE_ONNXRUNTIME
         CV_Error(Error::StsNotImplemented, "DNN/ONNX/ORT: loading from memory buffer is not supported");

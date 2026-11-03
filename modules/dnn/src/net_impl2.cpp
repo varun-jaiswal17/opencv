@@ -581,6 +581,13 @@ void Net::Impl::widenHalfConstants()
 
 void Net::Impl::prepareForInference()
 {
+#ifdef HAVE_INF_ENGINE
+    if (ov_engine)
+    {
+        prepared = true;  // OpenVINO optimizes the model itself
+        return;
+    }
+#endif
 #ifdef HAVE_ONNXRUNTIME
     if (this->ort_session)
     {
@@ -794,6 +801,10 @@ void Net::Impl::restoreFusedSnapshot()
 
 void Net::Impl::finalize()
 {
+#ifdef HAVE_INF_ENGINE
+    if (ov_engine)
+        return;  // the main graph is a placeholder, see finalizeOpenVINO()
+#endif
 #ifdef HAVE_ONNXRUNTIME
     if (ort_session)
         return;  // ONNX Runtime manages its own execution session
@@ -916,6 +927,13 @@ void Net::Impl::allocateLayerOutputs(
 
 void Net::Impl::forwardMainGraph(InputArrayOfArrays inputs, OutputArrayOfArrays outputs)
 {
+#ifdef HAVE_INF_ENGINE
+    if (ov_engine)
+    {
+        forwardOpenVINO(outputs, std::vector<std::string>());
+        return;
+    }
+#endif
 #ifdef HAVE_ONNXRUNTIME
     if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
         finalizeOrt();
@@ -1003,6 +1021,13 @@ static void assignSingleOutput(OutputArrayOfArrays outputBlobs, const Mat& resul
 
 void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayOfArrays outputBlobs)
 {
+#ifdef HAVE_INF_ENGINE
+    if (ov_engine)
+    {
+        forwardOpenVINO(outputBlobs, std::vector<std::string>(1, outname));
+        return;
+    }
+#endif
 #ifdef HAVE_ONNXRUNTIME
     if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
         finalizeOrt();
@@ -1099,6 +1124,13 @@ void Net::Impl::forwardWithSingleOutput(const std::string& outname, OutputArrayO
 
 void Net::Impl::forwardWithMultipleOutputs(OutputArrayOfArrays outblobs, const std::vector<std::string>& outnames)
 {
+#ifdef HAVE_INF_ENGINE
+    if (ov_engine)
+    {
+        forwardOpenVINO(outblobs, outnames);
+        return;
+    }
+#endif
 #ifdef HAVE_ONNXRUNTIME
     if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
         finalizeOrt();
@@ -1395,6 +1427,13 @@ void Net::Impl::traceArg(std::ostream& strm_, const char* prefix, size_t i, Arg 
 
 void Net::Impl::setMainGraphInput(InputArray m, const std::string& inpname)
 {
+#ifdef HAVE_INF_ENGINE
+    if (ov_engine)
+    {
+        setOpenVINOInput(m.getMat(), inpname);
+        return;
+    }
+#endif
 #ifdef HAVE_ONNXRUNTIME
     if (useOrtEngine && ortNeedsReinit && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
     {

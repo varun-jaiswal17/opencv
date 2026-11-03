@@ -676,6 +676,9 @@ static std::vector<EngineType> forwardOutputsEngines()
 #ifdef HAVE_ONNXRUNTIME
     engines.push_back(ENGINE_ORT);
 #endif
+#ifdef HAVE_INF_ENGINE
+    engines.push_back(ENGINE_OPENVINO);
+#endif
     return engines;
 }
 INSTANTIATE_TEST_CASE_P(/**/, Net_ForwardOutputsArePrivate, testing::ValuesIn(forwardOutputsEngines()));

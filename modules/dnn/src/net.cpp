@@ -135,6 +135,13 @@ void Net::finalizeNet()
 {
     CV_TRACE_FUNCTION();
     CV_Assert(impl);
+#ifdef HAVE_INF_ENGINE
+    if (impl->ov_engine)
+    {
+        impl->finalizeOpenVINO();
+        return;
+    }
+#endif
 #ifdef HAVE_ONNXRUNTIME
     if (impl->useOrtEngine && impl->mainGraph && impl->modelFormat == DNN_MODEL_ONNX && !impl->modelFileName.empty())
     {
