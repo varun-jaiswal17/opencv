@@ -2528,17 +2528,17 @@ TEST_P(Test_ONNX_layers, LayerNorm_External_Data)
     testONNXModels("layer_norm_external_data", npy);
 }
 
-// ENGINE_ORT registers the file for ONNX Runtime without parsing it, so neither the mapping
-// nor the bounds check below is reached.
-static bool ortEngineForced()
+// ENGINE_ORT and ENGINE_OPENVINO hand the file to their runtime without parsing it, so neither
+// the mapping nor the bounds check below is reached.
+static bool externalEngineForced()
 {
-    return static_cast<cv::dnn::EngineType>(cv::utils::getConfigurationParameterSizeT(
-               "OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO)) == cv::dnn::ENGINE_ORT;
+    const int engine = (int)cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO);
+    return engine == cv::dnn::ENGINE_ORT || engine == cv::dnn::ENGINE_OPENVINO;
 }
 
 TEST_P(Test_ONNX_layers, LayerNorm_External_Data_Unaligned)
 {
-    if (ortEngineForced())
+    if (externalEngineForced())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
 
     const uint64_t views = cv::dnn::mappedViewCount();
@@ -2568,7 +2568,7 @@ TEST_P(Test_ONNX_layers, LayerNorm_External_Data_Unaligned)
 
 TEST_P(Test_ONNX_layers, LayerNorm_External_Data_Truncated)
 {
-    if (ortEngineForced())
+    if (externalEngineForced())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
 
     // A range past the end of the file must be refused here; mapping it faults at inference.
@@ -2578,7 +2578,7 @@ TEST_P(Test_ONNX_layers, LayerNorm_External_Data_Truncated)
 
 TEST_P(Test_ONNX_layers, LayerNorm_External_Data_MappingDisabled)
 {
-    if (ortEngineForced())
+    if (externalEngineForced())
         applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
 
     const uint64_t views = cv::dnn::mappedViewCount();
@@ -4086,7 +4086,7 @@ TEST_P(Test_ONNX_layers, getUnconnectedOutLayers)
 {
     auto engine_forced = static_cast<cv::dnn::EngineType>(
         cv::utils::getConfigurationParameterSizeT("OPENCV_FORCE_DNN_ENGINE", cv::dnn::ENGINE_AUTO));
-    if (engine_forced == cv::dnn::ENGINE_ORT)
+    if (engine_forced == cv::dnn::ENGINE_ORT || engine_forced == cv::dnn::ENGINE_OPENVINO)
         applyTestTag(CV_TEST_TAG_DNN_SKIP_PARSER);
 
     Net net = readNetFromONNX(_tf("models/yolov8x.onnx", false));
