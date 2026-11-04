@@ -88,8 +88,11 @@ int lapack_gemm64fc(const double* src1, size_t src1_step, const double* src2, si
 #undef cv_hal_QR64f
 #define cv_hal_QR64f lapack_QR64f
 
+// the built-in sgemm is slower than fastGemm32f, so cv::hal::gemm32f tries it afterwards
+#ifndef HAVE_LAPACK_BUILTIN
 #undef cv_hal_gemm32f
 #define cv_hal_gemm32f lapack_gemm32f
+#endif
 #undef cv_hal_gemm64f
 #define cv_hal_gemm64f lapack_gemm64f
 #undef cv_hal_gemm32fc
