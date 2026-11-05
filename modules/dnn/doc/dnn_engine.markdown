@@ -40,6 +40,18 @@ cmake -DWITH_ONNXRUNTIME=ON -DDOWNLOAD_ONNXRUNTIME_GPU=ON ..
 
 ORT execution providers are supported, including CUDA for NVIDIA hardware. This makes `ENGINE_ORT` the recommended choice for GPU-accelerated inference while native GPU support for `ENGINE_OPENCV` is still in development.
 
+### ENGINE_OPENVINO
+
+`ENGINE_OPENVINO` hands the whole ONNX model to the OpenVINO runtime, which reads, compiles and runs it. OpenCV only passes the inputs in and the outputs back. It applies to ONNX models given by file path; loading from a memory buffer is not supported.
+
+`ENGINE_OPENVINO` must be enabled at compile time, with OpenVINO linked into the dnn module:
+
+```bash
+cmake -DWITH_OPENVINO=ON -DOpenVINO_DIR=<openvino>/runtime/cmake ..
+```
+
+The engine runs on the CPU for now, in FP32: other targets fall back to `DNN_TARGET_CPU` with a warning, and the backend set with `setPreferableBackend()` is ignored. When OpenVINO is built as a DNN plugin (`DNN_PLUGIN_LIST=openvino`), `DNN_BACKEND_INFERENCE_ENGINE` is available but `ENGINE_OPENVINO` is not, and models fall back to `ENGINE_OPENCV` with a warning.
+
 ### Selecting an Engine
 
 The engine parameter is accepted by the `readNet*()` family of functions.
@@ -54,6 +66,9 @@ cv::dnn::Net net = cv::dnn::readNetFromONNX("model.onnx", cv::dnn::ENGINE_OPENCV
 
 // Use ONNX Runtime (ONNX models only, requires WITH_ONNXRUNTIME=ON)
 cv::dnn::Net net = cv::dnn::readNetFromONNX("model.onnx", cv::dnn::ENGINE_ORT);
+
+// Use the OpenVINO runtime (ONNX models only, requires WITH_OPENVINO=ON)
+cv::dnn::Net net = cv::dnn::readNetFromONNX("model.onnx", cv::dnn::ENGINE_OPENVINO);
 @endcode
 @end_toggle
 
@@ -69,6 +84,9 @@ net = cv2.dnn.readNetFromONNX("model.onnx", engine=cv2.dnn.ENGINE_OPENCV)
 
 # Use ONNX Runtime (ONNX models only, requires WITH_ONNXRUNTIME=ON)
 net = cv2.dnn.readNetFromONNX("model.onnx", engine=cv2.dnn.ENGINE_ORT)
+
+# Use the OpenVINO runtime (ONNX models only, requires WITH_OPENVINO=ON)
+net = cv2.dnn.readNetFromONNX("model.onnx", engine=cv2.dnn.ENGINE_OPENVINO)
 @endcode
 @end_toggle
 
@@ -76,7 +94,7 @@ The engine cannot be changed after a model has been loaded. To use a different e
 
 ### Engine Selection via Environment Variable
 
-The engine can be overridden at the process level using the `OPENCV_FORCE_DNN_ENGINE` environment variable. The integer values correspond directly to the `EngineType` enum: 0 for `ENGINE_AUTO`, 1 for `ENGINE_OPENCV`, and 2 for `ENGINE_ORT`. Leaving the variable unset (or set to `ENGINE_AUTO`) does not force any engine, so the value passed to `readNet*()` is honored.
+The engine can be overridden at the process level using the `OPENCV_FORCE_DNN_ENGINE` environment variable. The integer values correspond directly to the `EngineType` enum: 0 for `ENGINE_AUTO`, 1 for `ENGINE_OPENCV`, 2 for `ENGINE_ORT`, and 3 for `ENGINE_OPENVINO`. Leaving the variable unset (or set to `ENGINE_AUTO`) does not force any engine, so the value passed to `readNet*()` is honored.
 
 ```bash
 # Linux / macOS
