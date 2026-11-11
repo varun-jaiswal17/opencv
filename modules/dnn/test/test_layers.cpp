@@ -1157,6 +1157,112 @@ INSTANTIATE_TEST_CASE_P(/**/, Layer_Attention_v_hidden, Combine(
     Values(3, 2)         // output_ndims
 ));
 
+// 600 tokens give three blocks of 256 keys, the last one partial
+TEST(Layer_Attention, flash_across_kv_blocks)
+{
+    ScopedNoMlas noMlas;
+    const int B = 2, S = 600, C = 32, NH = 2, d = C / NH;
+    std::vector<int> qkv_hidden_sizes = { C, C, C };
+    Mat W(C, 3 * C, CV_32F), bias(std::vector<int>{3 * C}, CV_32F), x(std::vector<int>{B, S, C}, CV_32F);
+    randu(W, -0.3f, 0.3f); randu(bias, -0.3f, 0.3f); randu(x, -1.f, 1.f);
+    LayerParams lp;
+    lp.blobs.push_back(W);
+    lp.blobs.push_back(bias);
+    lp.set("num_heads", NH);
+    lp.set("qkv_hidden_sizes", DictValue::arrayInt(&qkv_hidden_sizes[0], qkv_hidden_sizes.size()));
+    Ptr<AttentionLayer> layer = AttentionLayer::create(lp);
+
+    std::vector<MatShape> outShapes, internals;
+    layer->getMemoryShapes({shape(x)}, 1, outShapes, internals);
+    EXPECT_EQ((size_t)1, internals[1].total()) << "no S x S score matrix without a mask";
+
+    std::vector<Mat> in(1, x), out;
+    runLayer(layer, in, out);
+
+    Mat P = x.reshape(1, B * S) * W + repeat(Mat(1, 3 * C, CV_32F, bias.ptr<float>()), B * S, 1);
+    Mat ref(B * S, C, CV_32F);
+    for (int b = 0; b < B; b++)
+        for (int h = 0; h < NH; h++) {
+            Mat rows = P.rowRange(b * S, (b + 1) * S);
+            Mat q = rows.colRange(h * d, (h + 1) * d);
+            Mat k = rows.colRange(C + h * d, C + (h + 1) * d);
+            Mat v = rows.colRange(2 * C + h * d, 2 * C + (h + 1) * d);
+            Mat s = q * k.t() * (1.0 / std::sqrt((double)d));
+            for (int r = 0; r < S; r++) {
+                double mx; minMaxLoc(s.row(r), nullptr, &mx);
+                Mat e; exp(s.row(r) - mx, e);
+                Mat(e / sum(e)[0]).copyTo(s.row(r));
+            }
+            Mat(s * v).copyTo(ref(Range(b * S, (b + 1) * S), Range(h * d, (h + 1) * d)));
+        }
+    normAssert(ref.reshape(1, std::vector<int>{B, S, C}), out[0]);
+}
+
+// The additive mask is applied per score tile; shapes broadcast right-aligned to [B, NH, S, S].
+TEST(Layer_Attention, flash_with_mask)
+{
+    const int B = 2, S = 600, C = 32, NH = 2, d = C / NH;
+    std::vector<int> qkv_hidden_sizes = { C, C, C };
+    Mat W(C, 3 * C, CV_32F), bias(std::vector<int>{3 * C}, CV_32F), x(std::vector<int>{B, S, C}, CV_32F);
+    randu(W, -0.3f, 0.3f); randu(bias, -0.3f, 0.3f); randu(x, -1.f, 1.f);
+    LayerParams lp;
+    lp.blobs.push_back(W);
+    lp.blobs.push_back(bias);
+    lp.set("num_heads", NH);
+    lp.set("qkv_hidden_sizes", DictValue::arrayInt(&qkv_hidden_sizes[0], qkv_hidden_sizes.size()));
+    Mat P = x.reshape(1, B * S) * W + repeat(Mat(1, 3 * C, CV_32F, bias.ptr<float>()), B * S, 1);
+
+    const std::vector<std::vector<int> > maskShapes = { {S, S}, {B, 1, 1, S}, {B, NH, S, S}, {NH, S, 1} };
+    for (const std::vector<int>& ms : maskShapes)
+    {
+        SCOPED_TRACE(cv::format("mask %s", MatShape(ms).str().c_str()));
+        Mat mask(ms, CV_32F);
+        randu(mask, -2.f, 2.f);
+        if (ms.back() == S)
+        {
+            // every 7th key is masked out completely
+            Mat rows = mask.reshape(1, (int)(mask.total() / S));
+            for (int j = 3; j < S; j += 7)
+                rows.col(j).setTo(-INFINITY);
+        }
+        auto maskAt = [&](int b, int h, int q, int k) {
+            const int idx[4] = {b, h, q, k}, nd = (int)ms.size();
+            size_t ofs = 0;
+            for (int t = 0; t < nd; t++)
+                ofs = ofs * ms[t] + (ms[t] == 1 ? 0 : idx[4 - nd + t]);
+            return mask.ptr<float>()[ofs];
+        };
+
+        Ptr<AttentionLayer> layer = AttentionLayer::create(lp);
+        std::vector<MatShape> outShapes, internals;
+        layer->getMemoryShapes({shape(x), shape(mask)}, 1, outShapes, internals);
+        EXPECT_EQ((size_t)1, internals[1].total()) << "no S x S score matrix with a mask";
+
+        std::vector<Mat> in{x, mask}, out;
+        runLayer(layer, in, out);
+
+        Mat ref(B * S, C, CV_32F);
+        for (int b = 0; b < B; b++)
+            for (int h = 0; h < NH; h++) {
+                Mat rows = P.rowRange(b * S, (b + 1) * S);
+                Mat q = rows.colRange(h * d, (h + 1) * d);
+                Mat k = rows.colRange(C + h * d, C + (h + 1) * d);
+                Mat v = rows.colRange(2 * C + h * d, 2 * C + (h + 1) * d);
+                Mat s = q * k.t() * (1.0 / std::sqrt((double)d));
+                for (int r = 0; r < S; r++) {
+                    float* sr = s.ptr<float>(r);
+                    for (int j = 0; j < S; j++)
+                        sr[j] += maskAt(b, h, r, j);
+                    double mx; minMaxLoc(s.row(r), nullptr, &mx);
+                    Mat e; exp(s.row(r) - mx, e);
+                    Mat(e / sum(e)[0]).copyTo(s.row(r));
+                }
+                Mat(s * v).copyTo(ref(Range(b * S, (b + 1) * S), Range(h * d, (h + 1) * d)));
+            }
+        normAssert(ref.reshape(1, std::vector<int>{B, S, C}), out[0]);
+    }
+}
+
 typedef testing::TestWithParam<tuple<Vec4i, Vec2i, bool> > Scale_untrainable;
 TEST_P(Scale_untrainable, Accuracy)
 {
@@ -4685,6 +4791,91 @@ TEST(Test_Compress, AllFalse_WithoutAxis)
     runLayer(layer, inputs, outputs);
     ASSERT_EQ(outputs.size(), (size_t)1);
     ASSERT_EQ(shape(outputs[0]), MatShape({0}));
+}
+
+TEST(Layer_Test_CausalConvWithState, RejectMismatchedWeightBiasAndState)
+{
+    const int B = 2, C = 64, T = 8, K = 4;
+    Mat x(std::vector<int>{B, C, T}, CV_32F);
+    randu(x, -1, 1);
+    Mat w(std::vector<int>{C, 1, K}, CV_32F);
+    randu(w, -1, 1);
+    Mat bias(std::vector<int>{C}, CV_32F);
+    randu(bias, -1, 1);
+    Mat past(std::vector<int>{B, C, K - 1}, CV_32F);
+    randu(past, -1, 1);
+
+    LayerParams lp;
+    lp.type = "CausalConvWithState";
+    lp.name = "causal_conv_with_state";
+    Ptr<Layer> layer = LayerFactory::createLayerInstance(lp.type, lp);
+    ASSERT_TRUE(layer);
+
+    // weight must be [C, 1, K]
+    std::vector<Mat> inputs{x, Mat(std::vector<int>{1, 1, K}, CV_32F, Scalar(1))};
+    std::vector<Mat> outputs;
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x, Mat(std::vector<int>{C, 2, K}, CV_32F, Scalar(1))};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+
+    // bias must be [C]
+    inputs = {x, w, Mat(std::vector<int>{1}, CV_32F, Scalar(1))};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x, w, Mat(std::vector<int>{1, C}, CV_32F, Scalar(1))};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+
+    // past_state must be [B, C, K - 1]
+    inputs = {x, w, bias, Mat(std::vector<int>{B, 1, K - 1}, CV_32F, Scalar(1))};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x, w, bias, Mat(std::vector<int>{1, C, K - 1}, CV_32F, Scalar(1))};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x, w, bias, Mat(std::vector<int>{B, C, K}, CV_32F, Scalar(1))};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+
+    // weight, bias and past_state must have the input type, on both the fp32 and the fp16 path
+    Mat x16, w16, bias16, past16;
+    x.convertTo(x16, CV_16F);
+    w.convertTo(w16, CV_16F);
+    bias.convertTo(bias16, CV_16F);
+    past.convertTo(past16, CV_16F);
+    inputs = {x, w16};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x16, w};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x16, w16, bias};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x16, w16, bias16, past};
+    EXPECT_THROW(runLayer(layer, inputs, outputs), cv::Exception);
+    inputs = {x16, w16, bias16, past16};
+    EXPECT_NO_THROW(runLayer(layer, inputs, outputs));
+
+    // valid inputs give the depthwise causal convolution, with past_state read per batch
+    Mat ref(std::vector<int>{B, C, T}, CV_32F), refState(std::vector<int>{B, C, K - 1}, CV_32F);
+    for (int b = 0; b < B; b++)
+    {
+        for (int c = 0; c < C; c++)
+        {
+            std::vector<float> pad(K - 1 + T);
+            for (int j = 0; j < K - 1; j++)
+                pad[j] = past.ptr<float>(b, c)[j];
+            for (int t = 0; t < T; t++)
+                pad[K - 1 + t] = x.ptr<float>(b, c)[t];
+            for (int t = 0; t < T; t++)
+            {
+                float acc = bias.at<float>(c);
+                for (int k = 0; k < K; k++)
+                    acc += w.ptr<float>(c)[k] * pad[t + k];
+                ref.ptr<float>(b, c)[t] = acc;
+            }
+            for (int j = 0; j < K - 1; j++)
+                refState.ptr<float>(b, c)[j] = pad[T + j];
+        }
+    }
+    inputs = {x, w, bias, past};
+    ASSERT_NO_THROW(runLayer(layer, inputs, outputs));
+    ASSERT_EQ(outputs.size(), (size_t)2);
+    normAssert(ref, outputs[0], "output");
+    normAssert(refState, outputs[1], "present_state");
 }
 
 }} // namespace
