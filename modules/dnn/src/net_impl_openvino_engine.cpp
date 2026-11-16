@@ -24,6 +24,7 @@ CV__DNN_INLINE_NS_BEGIN
 
 struct OpenVINOEngine
 {
+    // read once; setPreferableTarget() only drops the compiled model, never this one
     std::shared_ptr<const ov::Model> model;
     ov::CompiledModel compiledModel;
     ov::InferRequest request;
@@ -123,6 +124,77 @@ Net readNetFromONNX2_OpenVINO(const String& onnxFile)
     return net;
 }
 
+// The OpenVINO device and precision for a DNN target, or false if ENGINE_OPENVINO does not map
+// the target. The precision is always given: without it the CPU plugin runs bf16 on CPUs with
+// AMX or AVX512_BF16, and the results would depend on the machine.
+static bool openVINODevice(int target, std::string& device, ov::element::Type& precision)
+{
+    switch (target)
+    {
+    case DNN_TARGET_CPU:         device = "CPU"; precision = ov::element::f32; return true;
+    case DNN_TARGET_OPENCL:      device = "GPU"; precision = ov::element::f32; return true;
+    case DNN_TARGET_OPENCL_FP16: device = "GPU"; precision = ov::element::f16; return true;
+    case DNN_TARGET_NPU:         device = "NPU"; precision = ov::element::f16; return true;
+    default:                     return false;
+    }
+}
+
+// openvino::checkTarget() accepts any GPU that OpenVINO lists, and the GPU plugin lists
+// non-Intel GPUs too, through OpenCL. "GPU" without an index is the plugin's first device,
+// which is an Intel GPU whenever the machine has one, so that is the device to check.
+static bool isOpenVINOTargetAvailable(int target)
+{
+    try
+    {
+        if (!openvino::checkTarget((Target)target))
+            return false;
+        if (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16)
+        {
+            const std::string arch = getCore("GPU").get_property("GPU", ov::device::architecture);
+            if (arch.find("vendor=0x8086") == std::string::npos)
+            {
+                CV_LOG_INFO(NULL, "DNN/OpenVINO: the first OpenVINO GPU is not an Intel GPU (" << arch << ")");
+                return false;
+            }
+        }
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        CV_LOG_INFO(NULL, "DNN/OpenVINO: checking target " << target << " failed: " << e.what());
+        return false;
+    }
+}
+
+void Net::Impl::setOpenVINOTarget(int targetId)
+{
+    CV_Assert(ov_engine);
+    std::string device;
+    ov::element::Type precision;
+    if (!openVINODevice(targetId, device, precision))
+    {
+        CV_LOG_WARNING(NULL, "DNN/OpenVINO: ENGINE_OPENVINO does not support target " << targetId
+                             << ", using DNN_TARGET_CPU instead");
+        targetId = DNN_TARGET_CPU;
+    }
+    else if (targetId != DNN_TARGET_CPU && !isOpenVINOTargetAvailable(targetId))
+    {
+        CV_LOG_WARNING(NULL, "DNN/OpenVINO: no OpenVINO " << device << " device is available for target "
+                             << targetId << ", using DNN_TARGET_CPU instead");
+        targetId = DNN_TARGET_CPU;
+    }
+    if (preferableTarget == targetId)
+        return;
+    preferableTarget = targetId;
+
+    // The model stays read. Only the compiled model is dropped, so the next forward() compiles
+    // it again for the new device without parsing the ONNX file again.
+    OpenVINOEngine& eng = *ov_engine;
+    eng.request = ov::InferRequest();
+    eng.compiledModel = ov::CompiledModel();
+    eng.compiled = false;
+}
+
 void Net::Impl::finalizeOpenVINO()
 {
     CV_Assert(ov_engine);
@@ -130,21 +202,29 @@ void Net::Impl::finalizeOpenVINO()
     if (eng.compiled)
         return;
 
-    // CPU only for now. Ask for f32 explicitly: the CPU plugin would otherwise run bf16 on CPUs
-    // with AMX or AVX512_BF16, and the results would depend on the machine.
-    const std::string device = "CPU";
+    // setOpenVINOTarget() only ever stores a mapped target; the check covers any other path
+    std::string device;
+    ov::element::Type precision;
+    if (!openVINODevice(preferableTarget, device, precision))
+    {
+        preferableTarget = DNN_TARGET_CPU;
+        openVINODevice(preferableTarget, device, precision);
+    }
     try
     {
         eng.compiledModel = getCore(device).compile_model(eng.model, device,
-                ov::AnyMap{ov::hint::inference_precision(ov::element::f32)});
+                ov::AnyMap{ov::hint::inference_precision(precision)});
         eng.request = eng.compiledModel.create_infer_request();
     }
     catch (const std::exception& e)
     {
-        CV_Error_(Error::StsError, ("DNN/OpenVINO: failed to compile the model for %s: %s",
-                                    device.c_str(), e.what()));
+        CV_Error_(Error::StsError, ("DNN/OpenVINO: failed to compile the model for %s (%s)%s: %s",
+                                    device.c_str(), precision.get_type_name().c_str(),
+                                    device == "CPU" ? "" : ", DNN_TARGET_CPU may still work",
+                                    e.what()));
     }
     eng.compiled = true;
+    CV_LOG_INFO(NULL, "DNN/OpenVINO: compiled the model for " << device << " (" << precision.get_type_name() << ")");
 }
 
 void Net::Impl::setOpenVINOInput(const Mat& blob, const std::string& name)
