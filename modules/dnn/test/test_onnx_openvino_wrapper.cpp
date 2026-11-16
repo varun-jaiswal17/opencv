@@ -5,6 +5,10 @@
 #include "test_precomp.hpp"
 #include "npy_blob.hpp"
 
+#ifdef HAVE_INF_ENGINE
+#include <openvino/runtime/core.hpp>
+#endif
+
 namespace opencv_test { namespace {
 
 #ifdef HAVE_INF_ENGINE
@@ -133,7 +137,8 @@ TEST(Test_ONNX_OpenVINO_Wrapper, OutputsKnownBeforeForward)
     EXPECT_EQ(timings.size(), 1u);
 }
 
-// Only DNN_TARGET_CPU is supported for now; the backend does not matter, OpenVINO runs everything.
+// Targets that ENGINE_OPENVINO does not map fall back to DNN_TARGET_CPU; the backend does not
+// matter, OpenVINO runs everything.
 TEST(Test_ONNX_OpenVINO_Wrapper, OtherTargetFallsBackToCPU)
 {
     const std::string basename = "convolution";
@@ -148,6 +153,88 @@ TEST(Test_ONNX_OpenVINO_Wrapper, OtherTargetFallsBackToCPU)
     cv::Mat out = net.forward();
 
     normAssert(ref, out, "OpenVINO convolution, CUDA target requested", 1e-5, 1e-4);
+}
+
+// Whether OpenVINO has a device for the target, checked as ENGINE_OPENVINO checks it: for the
+// GPU targets, "GPU" without an index must be an Intel GPU.
+static bool haveOpenVINODevice(int target)
+{
+    const std::string device = target == cv::dnn::DNN_TARGET_NPU ? "NPU"
+                             : (target == cv::dnn::DNN_TARGET_OPENCL || target == cv::dnn::DNN_TARGET_OPENCL_FP16) ? "GPU"
+                             : "CPU";
+    ov::Core core;
+    bool found = false;
+    for (const std::string& name : core.get_available_devices())
+        found = found || name.compare(0, device.size(), device) == 0;
+    if (found && device == "GPU")
+        found = core.get_property("GPU", ov::device::architecture).find("vendor=0x8086") != std::string::npos;
+    return found;
+}
+
+// The FP16 targets run in reduced precision, so they get wider tolerances.
+static void targetTolerances(int target, double& l1, double& lInf)
+{
+    if (target == cv::dnn::DNN_TARGET_OPENCL_FP16 || target == cv::dnn::DNN_TARGET_NPU)
+    {
+        l1 = 4e-3; lInf = 2e-2;
+    }
+    else if (target == cv::dnn::DNN_TARGET_OPENCL)
+    {
+        l1 = 1e-4; lInf = 1e-3;
+    }
+    else
+    {
+        l1 = 1e-5; lInf = 1e-4;
+    }
+}
+
+typedef testing::TestWithParam<cv::dnn::Target> Test_ONNX_OpenVINO_Wrapper_Target;
+
+// Each target runs on its OpenVINO device: CPU, GPU (f32 or f16) or NPU.
+TEST_P(Test_ONNX_OpenVINO_Wrapper_Target, convolution)
+{
+    const int target = GetParam();
+    if (!haveOpenVINODevice(target))
+        throw SkipTestException("OpenVINO has no device for this target");
+
+    const std::string basename = "convolution";
+    cv::Mat input = blobFromNPY(_tf("data/input_" + basename + ".npy"));
+    cv::Mat ref = blobFromNPY(_tf("data/output_" + basename + ".npy"));
+
+    cv::dnn::Net net = readNetFromONNX_OpenVINO(_tf("models/" + basename + ".onnx"));
+    net.setPreferableTarget(target);
+    net.setInput(input);
+    cv::Mat out = net.forward();
+
+    double l1, lInf;
+    targetTolerances(target, l1, lInf);
+    normAssert(ref, out, "OpenVINO convolution", l1, lInf);
+}
+
+INSTANTIATE_TEST_CASE_P(/**/, Test_ONNX_OpenVINO_Wrapper_Target, testing::Values(
+    cv::dnn::DNN_TARGET_CPU, cv::dnn::DNN_TARGET_OPENCL, cv::dnn::DNN_TARGET_OPENCL_FP16, cv::dnn::DNN_TARGET_NPU));
+
+// A target set after forward() compiles the model again for the new device, keeping the inputs
+// already set. Devices that are not available fall back to the CPU, so this runs on any machine.
+TEST(Test_ONNX_OpenVINO_Wrapper, TargetSwitch)
+{
+    const std::string basename = "convolution";
+    cv::Mat input = blobFromNPY(_tf("data/input_" + basename + ".npy"));
+    cv::Mat ref = blobFromNPY(_tf("data/output_" + basename + ".npy"));
+
+    cv::dnn::Net net = readNetFromONNX_OpenVINO(_tf("models/" + basename + ".onnx"));
+    net.setInput(input);
+    normAssert(ref, net.forward(), "on CPU", 1e-5, 1e-4);
+
+    const int targets[] = {cv::dnn::DNN_TARGET_OPENCL, cv::dnn::DNN_TARGET_OPENCL_FP16,
+                           cv::dnn::DNN_TARGET_NPU, cv::dnn::DNN_TARGET_CPU};
+    for (int target : targets)
+    {
+        net.setPreferableTarget(target);
+        double l1, lInf;
+        targetTolerances(target, l1, lInf);
+        normAssert(ref, net.forward(), cv::format("after switching to target %d", target).c_str(), l1, lInf);
+    }
 }
 
 // #28808 fixed ENGINE_ORT taking over every ONNX net. Nets read with the default engine must
