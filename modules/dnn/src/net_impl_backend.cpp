@@ -371,10 +371,7 @@ void Net::Impl::setPreferableTarget(int targetId)
 #ifdef HAVE_INF_ENGINE
     if (ov_engine)
     {
-        if (targetId != DNN_TARGET_CPU)
-            CV_LOG_WARNING(NULL, "DNN/OpenVINO: ENGINE_OPENVINO supports only DNN_TARGET_CPU for now, using it instead of target "
-                                 << targetId);
-        preferableTarget = DNN_TARGET_CPU;
+        setOpenVINOTarget(targetId);
         return;
     }
 #endif

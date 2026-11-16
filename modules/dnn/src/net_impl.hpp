@@ -363,7 +363,11 @@ struct Net::Impl : public detail::NetImplBase
     // it while opencv_dnn may not be, and both must agree on the layout of Net::Impl.
     std::shared_ptr<OpenVINOEngine> ov_engine;
 #ifdef HAVE_INF_ENGINE
-    // compiles the model on first use
+    // Maps DNN_TARGET_CPU, _OPENCL, _OPENCL_FP16 and _NPU to the OpenVINO CPU, GPU and NPU
+    // devices. Other targets, and devices that are not available, fall back to the CPU with a
+    // warning. A new target is compiled for on the next forward().
+    void setOpenVINOTarget(int targetId);
+    // compiles the model on first use, for the device of preferableTarget
     void finalizeOpenVINO();
     void setOpenVINOInput(const Mat& blob, const std::string& name);
     // Runs the model and hands copies of the named outputs to outBlobs, or of all outputs in
