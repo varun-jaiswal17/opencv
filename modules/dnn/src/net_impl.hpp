@@ -359,15 +359,16 @@ struct Net::Impl : public detail::NetImplBase
 #endif
 
     // ENGINE_OPENVINO: set only for a model read with that engine, which then runs whole in
-    // OpenVINO. Declared whatever HAVE_INF_ENGINE says: the OpenVINO DNN plugin is compiled with
+    // OpenVINO. Declared whatever OPENCV_DNN_OPENVINO says: the OpenVINO DNN plugin is compiled with
     // it while opencv_dnn may not be, and both must agree on the layout of Net::Impl.
     std::shared_ptr<OpenVINOEngine> ov_engine;
-#ifdef HAVE_INF_ENGINE
-    // Maps DNN_TARGET_CPU, _OPENCL, _OPENCL_FP16 and _NPU to the OpenVINO CPU, GPU and NPU
-    // devices. Other targets, and devices that are not available, fall back to the CPU with a
-    // warning. A new target is compiled for on the next forward().
+#ifdef OPENCV_DNN_OPENVINO
+    // Without a target the model is compiled for OpenVINO's AUTO device. A target fixes the
+    // device instead: DNN_TARGET_CPU, _OPENCL, _OPENCL_FP16 and _NPU map to the OpenVINO CPU, GPU
+    // and NPU devices. Other targets, and devices that are not available, fall back to the CPU
+    // with a warning. A new device is compiled for on the next forward().
     void setOpenVINOTarget(int targetId);
-    // compiles the model on first use, for the device of preferableTarget
+    // compiles the model on first use, for AUTO or the device fixed by setOpenVINOTarget()
     void finalizeOpenVINO();
     void setOpenVINOInput(const Mat& blob, const std::string& name);
     // Runs the model and hands copies of the named outputs to outBlobs, or of all outputs in
@@ -628,7 +629,7 @@ Net readNetFromONNX2(const std::vector<uchar>&);
 #ifdef HAVE_ONNXRUNTIME
 Net readNetFromONNX2_ORT(const String& onnxFile);
 #endif
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
 Net readNetFromONNX2_OpenVINO(const String& onnxFile);
 #endif
 

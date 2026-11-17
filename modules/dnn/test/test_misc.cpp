@@ -632,6 +632,9 @@ TEST(Net, forwardAndRetrieve)
 static void testForwardOutputsArePrivate(EngineType engine)
 {
     Net net = readNetFromONNX(findDataFile("dnn/onnx/models/top_k.onnx"), engine);
+    // results of different calls are compared, so the device must not change between them, as
+    // it can with the AUTO device ENGINE_OPENVINO uses without a target
+    net.setPreferableTarget(DNN_TARGET_CPU);
     Mat inp = readTensorFromONNX(findDataFile("dnn/onnx/data/input_top_k.pb"));
     const std::vector<String> names = {"values", "indices"};
 
@@ -676,7 +679,7 @@ static std::vector<EngineType> forwardOutputsEngines()
 #ifdef HAVE_ONNXRUNTIME
     engines.push_back(ENGINE_ORT);
 #endif
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
     engines.push_back(ENGINE_OPENVINO);
 #endif
     return engines;

@@ -25,7 +25,7 @@ static std::vector<std::string> perfEngines()
 #ifdef HAVE_ONNXRUNTIME
     engines.push_back("ORT");
 #endif
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
     engines.push_back("OpenVINO");
 #endif
     return engines;
@@ -45,6 +45,9 @@ PERF_TEST_P_(DNN_ONNX_Engine, forward)
     const bool ranByOpenCV = !net.getMainGraph()->prog().empty();
     if (ranByOpenCV != (engine == ENGINE_OPENCV))
         throw SkipTestException("the requested engine is not the one that read the model");
+
+    // the CPU for every engine; ENGINE_OPENVINO would otherwise let OpenVINO AUTO choose
+    net.setPreferableTarget(DNN_TARGET_CPU);
 
     Mat input({1, 3, 224, 224}, CV_32F);
     randu(input, 0.f, 1.f);

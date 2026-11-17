@@ -304,7 +304,7 @@ void Net::Impl::setPreferableBackend(Net& net, int backendId)
     if (preferableBackend == backendId)
         return;
 
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
     if (ov_engine)
     {
         preferableBackend = backendId;  // the whole model runs in OpenVINO whatever the backend
@@ -368,7 +368,7 @@ void Net::Impl::setPreferableBackend(Net& net, int backendId)
 
 void Net::Impl::setPreferableTarget(int targetId)
 {
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
     if (ov_engine)
     {
         setOpenVINOTarget(targetId);

@@ -135,7 +135,7 @@ void Net::finalizeNet()
 {
     CV_TRACE_FUNCTION();
     CV_Assert(impl);
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
     if (impl->ov_engine)
     {
         impl->finalizeOpenVINO();

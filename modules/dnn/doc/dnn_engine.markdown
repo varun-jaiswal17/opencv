@@ -50,16 +50,19 @@ ORT execution providers are supported, including CUDA for NVIDIA hardware. This 
 cmake -DWITH_OPENVINO=ON -DOpenVINO_DIR=<openvino>/runtime/cmake ..
 ```
 
-`setPreferableTarget()` selects the OpenVINO device:
+The model is compiled on the first `forward()`, or by `finalizeNet()`. Without a target it is compiled for OpenVINO's `AUTO` device, and OpenVINO chooses the device. With its default settings, AUTO leaves out the NPU and GPUs that are not Intel GPUs, prefers a discrete Intel GPU, then an integrated one, then the CPU, and runs the first inferences on the CPU while the model is still compiling for the GPU.
 
-| Target | OpenVINO device | Precision |
-|---|---|---|
-| `DNN_TARGET_CPU` (default) | CPU | FP32 |
-| `DNN_TARGET_OPENCL` | GPU | FP32 |
-| `DNN_TARGET_OPENCL_FP16` | GPU | FP16 |
-| `DNN_TARGET_NPU` | NPU | FP16 |
+`setPreferableTarget()` fixes the device instead:
 
-"GPU" is OpenVINO's first GPU, which is the Intel integrated GPU when there is one. Other targets, and devices that OpenVINO does not find (or a first GPU that is not an Intel GPU), fall back to `DNN_TARGET_CPU` with a warning. The model is compiled for the device on the first `forward()`. Changing the target later compiles it again on the next `forward()`, without reading the ONNX file again. The backend set with `setPreferableBackend()` is ignored. When OpenVINO is built as a DNN plugin (`DNN_PLUGIN_LIST=openvino`), `DNN_BACKEND_INFERENCE_ENGINE` is available but `ENGINE_OPENVINO` is not, and models fall back to `ENGINE_OPENCV` with a warning.
+| Target | OpenVINO device |
+|---|---|
+| none | AUTO |
+| `DNN_TARGET_CPU` | CPU |
+| `DNN_TARGET_OPENCL` | GPU |
+| `DNN_TARGET_OPENCL_FP16` | GPU |
+| `DNN_TARGET_NPU` | NPU |
+
+OpenCV does not set a precision: each device runs at OpenVINO's default inference precision, which is FP16 on the GPU (for both GPU targets) and FP32 on most CPUs (BF16 on CPUs with AMX). With AUTO, the first results can therefore come from the CPU in FP32 and later ones from a GPU in FP16. "GPU" is OpenVINO's first GPU, which is the Intel integrated GPU when there is one. Other targets, and devices that OpenVINO does not find (or a first GPU that is not an Intel GPU), fall back to `DNN_TARGET_CPU` with a warning. Changing the target after the model was compiled compiles it again on the next `forward()` for the new device, without reading the ONNX file again. The backend set with `setPreferableBackend()` is ignored. When OpenVINO is built as a DNN plugin (`DNN_PLUGIN_LIST=openvino`), `DNN_BACKEND_INFERENCE_ENGINE` is available but `ENGINE_OPENVINO` is not, and models fall back to `ENGINE_OPENCV` with a warning.
 
 ### Selecting an Engine
 

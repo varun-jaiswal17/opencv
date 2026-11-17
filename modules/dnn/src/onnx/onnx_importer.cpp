@@ -69,7 +69,7 @@ static int resolveOnnxEngine(int engine)
     return engine;
 }
 
-#ifndef HAVE_INF_ENGINE
+#ifndef OPENCV_DNN_OPENVINO
 // Also printed for WITH_OPENVINO=ON when OpenVINO is built as a DNN plugin (DNN_PLUGIN_LIST):
 // the plugin provides DNN_BACKEND_INFERENCE_ENGINE, but not the engine.
 static void warnNoOpenVINOEngine()
@@ -84,7 +84,7 @@ Net readNetFromONNX(const String& onnxFile, int engine, bool mapExternalData)
     const int resolved = resolveOnnxEngine(engine);
     if (resolved == ENGINE_OPENVINO)
     {
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
         return readNetFromONNX2_OpenVINO(onnxFile);
 #else
         warnNoOpenVINOEngine();
@@ -116,7 +116,7 @@ Net readNetFromONNX(const char* buffer, size_t sizeBuffer, int engine)
     const int resolved = resolveOnnxEngine(engine);
     if (resolved == ENGINE_OPENVINO)
     {
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
         CV_Error(Error::StsNotImplemented, "DNN/ONNX/OpenVINO: loading from memory buffer is not supported");
 #else
         warnNoOpenVINOEngine();
@@ -138,7 +138,7 @@ Net readNetFromONNX(const std::vector<uchar>& buffer, int engine)
     const int resolved = resolveOnnxEngine(engine);
     if (resolved == ENGINE_OPENVINO)
     {
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
         CV_Error(Error::StsNotImplemented, "DNN/ONNX/OpenVINO: loading from memory buffer is not supported");
 #else
         warnNoOpenVINOEngine();

@@ -10,7 +10,7 @@
 
 #include "net_impl.hpp"
 
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
 
 #include <climits>
 
@@ -26,6 +26,9 @@ struct OpenVINOEngine
 {
     // read once; setPreferableTarget() only drops the compiled model, never this one
     std::shared_ptr<const ov::Model> model;
+    // the OpenVINO device the model is compiled for: AUTO lets OpenVINO choose it, until
+    // setPreferableTarget() fixes one
+    std::string device = "AUTO";
     ov::CompiledModel compiledModel;
     ov::InferRequest request;
     bool compiled = false;
@@ -124,17 +127,18 @@ Net readNetFromONNX2_OpenVINO(const String& onnxFile)
     return net;
 }
 
-// The OpenVINO device and precision for a DNN target, or false if ENGINE_OPENVINO does not map
-// the target. The precision is always given: without it the CPU plugin runs bf16 on CPUs with
-// AMX or AVX512_BF16, and the results would depend on the machine.
-static bool openVINODevice(int target, std::string& device, ov::element::Type& precision)
+// The OpenVINO device for a target set with setPreferableTarget(), or false if ENGINE_OPENVINO
+// does not map the target. No precision is passed to OpenVINO, so each device runs at its
+// default inference precision: f16 on the GPU (for both GPU targets), f32 on most CPUs, bf16 on
+// CPUs with AMX.
+static bool openVINODevice(int target, std::string& device)
 {
     switch (target)
     {
-    case DNN_TARGET_CPU:         device = "CPU"; precision = ov::element::f32; return true;
-    case DNN_TARGET_OPENCL:      device = "GPU"; precision = ov::element::f32; return true;
-    case DNN_TARGET_OPENCL_FP16: device = "GPU"; precision = ov::element::f16; return true;
-    case DNN_TARGET_NPU:         device = "NPU"; precision = ov::element::f16; return true;
+    case DNN_TARGET_CPU:         device = "CPU"; return true;
+    case DNN_TARGET_OPENCL:
+    case DNN_TARGET_OPENCL_FP16: device = "GPU"; return true;
+    case DNN_TARGET_NPU:         device = "NPU"; return true;
     default:                     return false;
     }
 }
@@ -170,29 +174,48 @@ void Net::Impl::setOpenVINOTarget(int targetId)
 {
     CV_Assert(ov_engine);
     std::string device;
-    ov::element::Type precision;
-    if (!openVINODevice(targetId, device, precision))
+    if (!openVINODevice(targetId, device))
     {
         CV_LOG_WARNING(NULL, "DNN/OpenVINO: ENGINE_OPENVINO does not support target " << targetId
                              << ", using DNN_TARGET_CPU instead");
         targetId = DNN_TARGET_CPU;
+        device = "CPU";
     }
     else if (targetId != DNN_TARGET_CPU && !isOpenVINOTargetAvailable(targetId))
     {
         CV_LOG_WARNING(NULL, "DNN/OpenVINO: no OpenVINO " << device << " device is available for target "
                              << targetId << ", using DNN_TARGET_CPU instead");
         targetId = DNN_TARGET_CPU;
+        device = "CPU";
     }
-    if (preferableTarget == targetId)
-        return;
     preferableTarget = targetId;
+    OpenVINOEngine& eng = *ov_engine;
+    // DNN_TARGET_OPENCL and DNN_TARGET_OPENCL_FP16 run the same way, so the compiled model is kept
+    if (eng.device == device)
+        return;
+    eng.device = device;
 
     // The model stays read. Only the compiled model is dropped, so the next forward() compiles
     // it again for the new device without parsing the ONNX file again.
-    OpenVINOEngine& eng = *ov_engine;
     eng.request = ov::InferRequest();
     eng.compiledModel = ov::CompiledModel();
     eng.compiled = false;
+}
+
+// The devices a compiled model runs on, for the log. Right after an AUTO compile this is
+// "(CPU)" while the GPU still compiles; AUTO moves to the GPU once it is ready.
+static std::string executionDevices(const ov::CompiledModel& compiled)
+{
+    std::string list;
+    try
+    {
+        for (const std::string& name : compiled.get_property(ov::execution_devices))
+            list += (list.empty() ? "" : ",") + name;
+    }
+    catch (const std::exception&)
+    {
+    }
+    return list.empty() ? std::string("unknown") : list;
 }
 
 void Net::Impl::finalizeOpenVINO()
@@ -202,29 +225,23 @@ void Net::Impl::finalizeOpenVINO()
     if (eng.compiled)
         return;
 
-    // setOpenVINOTarget() only ever stores a mapped target; the check covers any other path
-    std::string device;
-    ov::element::Type precision;
-    if (!openVINODevice(preferableTarget, device, precision))
-    {
-        preferableTarget = DNN_TARGET_CPU;
-        openVINODevice(preferableTarget, device, precision);
-    }
+    // AUTO unless setPreferableTarget() fixed a device. No precision hint either: the device
+    // runs at OpenVINO's default inference precision.
+    const std::string device = eng.device;
     try
     {
-        eng.compiledModel = getCore(device).compile_model(eng.model, device,
-                ov::AnyMap{ov::hint::inference_precision(precision)});
+        eng.compiledModel = getCore(device).compile_model(eng.model, device);
         eng.request = eng.compiledModel.create_infer_request();
     }
     catch (const std::exception& e)
     {
-        CV_Error_(Error::StsError, ("DNN/OpenVINO: failed to compile the model for %s (%s)%s: %s",
-                                    device.c_str(), precision.get_type_name().c_str(),
-                                    device == "CPU" ? "" : ", DNN_TARGET_CPU may still work",
+        CV_Error_(Error::StsError, ("DNN/OpenVINO: failed to compile the model for %s%s: %s",
+                                    device.c_str(), device == "CPU" ? "" : ", DNN_TARGET_CPU may still work",
                                     e.what()));
     }
     eng.compiled = true;
-    CV_LOG_INFO(NULL, "DNN/OpenVINO: compiled the model for " << device << " (" << precision.get_type_name() << ")");
+    CV_LOG_INFO(NULL, "DNN/OpenVINO: compiled the model for " << device << ", running on "
+                      << executionDevices(eng.compiledModel));
 }
 
 void Net::Impl::setOpenVINOInput(const Mat& blob, const std::string& name)
@@ -366,4 +383,4 @@ void Net::Impl::forwardOpenVINO(OutputArrayOfArrays outBlobs, const std::vector<
 CV__DNN_INLINE_NS_END
 }}  // namespace cv::dnn
 
-#endif  // HAVE_INF_ENGINE
+#endif  // OPENCV_DNN_OPENVINO

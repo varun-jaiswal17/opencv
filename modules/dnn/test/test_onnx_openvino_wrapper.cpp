@@ -5,13 +5,13 @@
 #include "test_precomp.hpp"
 #include "npy_blob.hpp"
 
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
 #include <openvino/runtime/core.hpp>
 #endif
 
 namespace opencv_test { namespace {
 
-#ifdef HAVE_INF_ENGINE
+#ifdef OPENCV_DNN_OPENVINO
 
 static std::string _tf(const std::string& filename, bool required = true)
 {
@@ -108,6 +108,8 @@ TEST(Test_ONNX_OpenVINO_Wrapper, OutputsKnownBeforeForward)
 {
     const std::string basename = "top_k";
     cv::dnn::Net net = readNetFromONNX_OpenVINO(_tf("models/" + basename + ".onnx"));
+    // exact values: fix the CPU, AUTO could move to a GPU running f16
+    net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
 
     std::vector<std::string> names = net.getUnconnectedOutLayersNames();
     ASSERT_EQ(names.size(), 2u);
@@ -155,13 +157,33 @@ TEST(Test_ONNX_OpenVINO_Wrapper, OtherTargetFallsBackToCPU)
     normAssert(ref, out, "OpenVINO convolution, CUDA target requested", 1e-5, 1e-4);
 }
 
+// Without a target the model is compiled for OpenVINO's AUTO device. AUTO may start on the CPU
+// and move to an Intel GPU after the first inferences, so the tolerances cover f16.
+TEST(Test_ONNX_OpenVINO_Wrapper, Auto)
+{
+    const std::string basename = "convolution";
+    cv::Mat input = blobFromNPY(_tf("data/input_" + basename + ".npy"));
+    cv::Mat ref = blobFromNPY(_tf("data/output_" + basename + ".npy"));
+
+    cv::dnn::Net net = readNetFromONNX_OpenVINO(_tf("models/" + basename + ".onnx"));
+    net.setInput(input);
+    for (int i = 0; i < 5; i++)
+        normAssert(ref, net.forward(), cv::format("AUTO, forward %d", i).c_str(), 4e-3, 2e-2);
+}
+
+// The OpenVINO device of a DNN target, as ENGINE_OPENVINO maps it
+static std::string openVINODeviceName(int target)
+{
+    return target == cv::dnn::DNN_TARGET_NPU ? "NPU"
+         : (target == cv::dnn::DNN_TARGET_OPENCL || target == cv::dnn::DNN_TARGET_OPENCL_FP16) ? "GPU"
+         : "CPU";
+}
+
 // Whether OpenVINO has a device for the target, checked as ENGINE_OPENVINO checks it: for the
 // GPU targets, "GPU" without an index must be an Intel GPU.
 static bool haveOpenVINODevice(int target)
 {
-    const std::string device = target == cv::dnn::DNN_TARGET_NPU ? "NPU"
-                             : (target == cv::dnn::DNN_TARGET_OPENCL || target == cv::dnn::DNN_TARGET_OPENCL_FP16) ? "GPU"
-                             : "CPU";
+    const std::string device = openVINODeviceName(target);
     ov::Core core;
     bool found = false;
     for (const std::string& name : core.get_available_devices())
@@ -171,26 +193,26 @@ static bool haveOpenVINODevice(int target)
     return found;
 }
 
-// The FP16 targets run in reduced precision, so they get wider tolerances.
+// ENGINE_OPENVINO leaves the precision to OpenVINO, so the tolerances follow the default
+// inference precision of the device the target runs on (the CPU when the device is missing).
+// Anything below f32 (f16 on the GPU, bf16 on CPUs with AMX) gets wider tolerances.
 static void targetTolerances(int target, double& l1, double& lInf)
 {
-    if (target == cv::dnn::DNN_TARGET_OPENCL_FP16 || target == cv::dnn::DNN_TARGET_NPU)
+    const std::string device = haveOpenVINODevice(target) ? openVINODeviceName(target) : "CPU";
+    ov::Core core;
+    if (core.get_property(device, ov::hint::inference_precision) == ov::element::f32)
     {
-        l1 = 4e-3; lInf = 2e-2;
-    }
-    else if (target == cv::dnn::DNN_TARGET_OPENCL)
-    {
-        l1 = 1e-4; lInf = 1e-3;
+        l1 = 1e-5; lInf = 1e-4;
     }
     else
     {
-        l1 = 1e-5; lInf = 1e-4;
+        l1 = 4e-3; lInf = 2e-2;
     }
 }
 
 typedef testing::TestWithParam<cv::dnn::Target> Test_ONNX_OpenVINO_Wrapper_Target;
 
-// Each target runs on its OpenVINO device: CPU, GPU (f32 or f16) or NPU.
+// Each target runs on its OpenVINO device (CPU, GPU or NPU) at the device's default precision.
 TEST_P(Test_ONNX_OpenVINO_Wrapper_Target, convolution)
 {
     const int target = GetParam();
@@ -223,6 +245,7 @@ TEST(Test_ONNX_OpenVINO_Wrapper, TargetSwitch)
     cv::Mat ref = blobFromNPY(_tf("data/output_" + basename + ".npy"));
 
     cv::dnn::Net net = readNetFromONNX_OpenVINO(_tf("models/" + basename + ".onnx"));
+    net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
     net.setInput(input);
     normAssert(ref, net.forward(), "on CPU", 1e-5, 1e-4);
 
@@ -303,6 +326,7 @@ TEST(Test_ONNX_OpenVINO_Wrapper, NonAsciiPath)
     cv::dnn::Net net = readNetFromONNX_OpenVINO(path);
     std::remove(path.c_str());
 
+    net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
     net.setInput(input);
     cv::Mat out = net.forward();
 
@@ -351,7 +375,7 @@ TEST(Test_ONNX_OpenVINO_Wrapper, SSD_Inception_v2)
     runSSDDetectorOpenVINO("ssd_inception_v2_coco_2017_11_17.onnx");
 }
 
-#else  // HAVE_INF_ENGINE
+#else  // OPENCV_DNN_OPENVINO
 
 TEST(Test_ONNX_OpenVINO_Wrapper, DISABLED_NoOpenVINO) {}
 
