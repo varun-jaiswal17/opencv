@@ -9,6 +9,8 @@
 #include <openvino/runtime/core.hpp>
 #endif
 
+#include <fstream>
+
 namespace opencv_test { namespace {
 
 #ifdef OPENCV_DNN_OPENVINO
@@ -169,6 +171,88 @@ TEST(Test_ONNX_OpenVINO_Wrapper, Auto)
     net.setInput(input);
     for (int i = 0; i < 5; i++)
         normAssert(ref, net.forward(), cv::format("AUTO, forward %d", i).c_str(), 4e-3, 2e-2);
+}
+
+// Sets an environment variable for the lifetime of the object, as test_ffmpeg.cpp does
+class ScopedEnv
+{
+public:
+    ScopedEnv(const char* name, const std::string& value) : name_(name) { set(value); }
+    ~ScopedEnv() { set(""); }
+private:
+    void set(const std::string& value)
+    {
+#ifdef _WIN32
+        _putenv_s(name_, value.c_str());
+#else
+        if (value.empty())
+            unsetenv(name_);
+        else
+            setenv(name_, value.c_str(), 1);
+#endif
+    }
+    const char* name_;
+};
+
+// The AUTO settings reach OpenVINO when the model is compiled. With the CPU as the only candidate,
+// AUTO accepts them but has nothing to choose from, so this runs on any machine, IPF or not.
+TEST(Test_ONNX_OpenVINO_Wrapper, AutoSettings)
+{
+    const std::string basename = "convolution";
+    cv::Mat input = blobFromNPY(_tf("data/input_" + basename + ".npy"));
+    cv::Mat ref = blobFromNPY(_tf("data/output_" + basename + ".npy"));
+
+    const std::string curves = cv::tempfile(".json");
+    {
+        std::ofstream file(curves.c_str());
+        file << "{ \"CPU\": [[0, 1.0], [50, 2.0], [100, 4.0]] }\n";
+    }
+    {
+        ScopedEnv devices("OPENCV_DNN_OPENVINO_AUTO_DEVICES", "CPU");
+        ScopedEnv thresholds("OPENCV_DNN_OPENVINO_AUTO_UTILIZATION_THRESHOLD", "CPU:90");
+        ScopedEnv curveFile("OPENCV_DNN_OPENVINO_AUTO_PERF_CURVES", curves);
+        ScopedEnv lowPower("OPENCV_DNN_OPENVINO_AUTO_LOW_POWER_DEVICE", "CPU");
+
+        cv::dnn::Net net = readNetFromONNX_OpenVINO(_tf("models/" + basename + ".onnx"));
+        net.setInput(input);
+        for (int i = 0; i < 3; i++)
+            normAssert(ref, net.forward(), cv::format("AUTO with settings, forward %d", i).c_str(), 1e-5, 1e-4);
+    }
+    remove(curves.c_str());
+}
+
+// A setting that can't be read stops the compile with an error that names the variable
+TEST(Test_ONNX_OpenVINO_Wrapper, AutoSettingsErrors)
+{
+    const std::string basename = "convolution";
+    cv::Mat input = blobFromNPY(_tf("data/input_" + basename + ".npy"));
+    const std::string onnxmodel = _tf("models/" + basename + ".onnx");
+
+    const char* badThresholds[] = {"GPU=80", "CPU:101", "CPU:-5", ":50", "CPU:"};
+    for (const char* bad : badThresholds)
+    {
+        ScopedEnv devices("OPENCV_DNN_OPENVINO_AUTO_DEVICES", "CPU");
+        ScopedEnv thresholds("OPENCV_DNN_OPENVINO_AUTO_UTILIZATION_THRESHOLD", bad);
+        cv::dnn::Net net = readNetFromONNX_OpenVINO(onnxmodel);
+        net.setInput(input);
+        EXPECT_THROW(net.forward(), cv::Exception) << bad;
+    }
+
+    const std::string curves = cv::tempfile(".json");
+    {
+        std::ofstream file(curves.c_str());
+        file << "{ \"CPU\": [[0, 1.0], [150, 2.0]] }\n";  // 150 percent
+    }
+    const std::string badCurves[] = {curves, curves + ".missing"};
+    for (const std::string& bad : badCurves)
+    {
+        ScopedEnv devices("OPENCV_DNN_OPENVINO_AUTO_DEVICES", "CPU");
+        ScopedEnv curveFile("OPENCV_DNN_OPENVINO_AUTO_PERF_CURVES", bad);
+        cv::dnn::Net net = readNetFromONNX_OpenVINO(onnxmodel);
+        net.setInput(input);
+        EXPECT_THROW(net.forward(), cv::Exception) << bad;
+    }
+    remove(curves.c_str());
 }
 
 // The OpenVINO device of a DNN target, as ENGINE_OPENVINO maps it

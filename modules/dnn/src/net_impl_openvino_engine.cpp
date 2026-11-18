@@ -12,7 +12,11 @@
 
 #ifdef OPENCV_DNN_OPENVINO
 
+#include <algorithm>
+#include <cctype>
 #include <climits>
+#include <cmath>
+#include <map>
 
 #if defined(_WIN32) && defined(OPENVINO_ENABLE_UNICODE_PATH_SUPPORT)
 #include <windows.h>
@@ -32,6 +36,7 @@ struct OpenVINOEngine
     ov::CompiledModel compiledModel;
     ov::InferRequest request;
     bool compiled = false;
+    std::string runningOn;  // the execution devices last logged, to log when AUTO moves
 
     // per model input, in model order
     std::vector<std::string> inputNames;
@@ -218,6 +223,161 @@ static std::string executionDevices(const ov::CompiledModel& compiled)
     return list.empty() ? std::string("unknown") : list;
 }
 
+// Settings read from the environment each time the model is compiled. The cache directory applies
+// to every device; the AUTO settings only when no target is set, each to the AUTO property of the
+// same purpose (see dnn_engine.markdown).
+static const char* const ENV_CACHE_DIR = "OPENCV_DNN_OPENVINO_CACHE_DIR";
+static const char* const ENV_AUTO_DEVICES = "OPENCV_DNN_OPENVINO_AUTO_DEVICES";
+static const char* const ENV_AUTO_UTILIZATION = "OPENCV_DNN_OPENVINO_AUTO_UTILIZATION_THRESHOLD";
+static const char* const ENV_AUTO_PERF_CURVES = "OPENCV_DNN_OPENVINO_AUTO_PERF_CURVES";
+static const char* const ENV_AUTO_LOW_POWER_DEVICE = "OPENCV_DNN_OPENVINO_AUTO_LOW_POWER_DEVICE";
+static const char* const ENV_AUTO_COMPILE_FOR_ALL = "OPENCV_DNN_OPENVINO_AUTO_COMPILE_FOR_ALL";
+
+static std::string withoutSpaces(std::string text)
+{
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) { return std::isspace(c) != 0; }),
+               text.end());
+    return text;
+}
+
+// "GPU:80,CPU:90": AUTO leaves a device out while its utilization is above its percent
+static std::map<std::string, unsigned> parseUtilizationThresholds(const std::string& value)
+{
+    std::map<std::string, unsigned> thresholds;
+    std::istringstream items(withoutSpaces(value));
+    std::string item;
+    while (std::getline(items, item, ','))
+    {
+        const size_t colon = item.find(':');
+        const std::string percent = colon == std::string::npos ? std::string() : item.substr(colon + 1);
+        const bool digits = !percent.empty() && percent.size() <= 3 &&
+            std::all_of(percent.begin(), percent.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+        if (colon == 0 || !digits || std::atoi(percent.c_str()) > 100)
+            CV_Error_(Error::StsBadArg, ("DNN/OpenVINO: %s: '%s' is not DEVICE:PERCENT with a percent from 0 to 100",
+                                         ENV_AUTO_UTILIZATION, item.c_str()));
+        thresholds[item.substr(0, colon)] = (unsigned)std::atoi(percent.c_str());
+    }
+    return thresholds;
+}
+
+// A JSON file, read with cv::FileStorage, with one curve per device key ("CPU", "iGPU", "dGPU",
+// "NPU"). A curve lists [utilization percent, score] points, and AUTO picks the device with the
+// lowest score at its current utilization:
+//   { "CPU": [[0, 9.4], [100, 30.0]], "iGPU": [[0, 13.9], [100, 60.0]] }
+static std::map<std::string, std::map<unsigned, float> > readPerfCurves(const std::string& path)
+{
+    FileStorage fs;
+    try
+    {
+        fs.open(path, FileStorage::READ);
+    }
+    catch (const cv::Exception& e)
+    {
+        CV_Error_(Error::StsBadArg, ("DNN/OpenVINO: %s: can't parse '%s': %s",
+                                     ENV_AUTO_PERF_CURVES, path.c_str(), e.what()));
+    }
+    if (!fs.isOpened())
+        CV_Error_(Error::StsBadArg, ("DNN/OpenVINO: %s: can't open '%s'", ENV_AUTO_PERF_CURVES, path.c_str()));
+
+    std::map<std::string, std::map<unsigned, float> > table;
+    const FileNode root = fs.root();
+    if (!root.isMap() || root.empty())
+        CV_Error_(Error::StsBadArg, ("DNN/OpenVINO: %s: '%s' must map device keys to curves",
+                                     ENV_AUTO_PERF_CURVES, path.c_str()));
+    for (FileNodeIterator it = root.begin(); it != root.end(); ++it)
+    {
+        const FileNode curve = *it;
+        std::map<unsigned, float>& points = table[curve.name()];
+        bool valid = curve.isSeq() && !curve.empty();
+        for (FileNodeIterator p = curve.begin(); valid && p != curve.end(); ++p)
+        {
+            const FileNode point = *p;
+            valid = point.isSeq() && point.size() == 2 && (point[0].isInt() || point[0].isReal()) &&
+                    (point[1].isInt() || point[1].isReal());
+            const double utilization = valid ? (double)point[0] : -1.0;
+            valid = valid && utilization >= 0 && utilization <= 100 && utilization == std::floor(utilization);
+            if (valid)
+                points[(unsigned)utilization] = (float)(double)point[1];
+        }
+        if (!valid)
+            CV_Error_(Error::StsBadArg, ("DNN/OpenVINO: %s: the curve of '%s' must list [utilization, score] "
+                                         "points, with whole percents from 0 to 100",
+                                         ENV_AUTO_PERF_CURVES, curve.name().c_str()));
+    }
+    return table;
+}
+
+// The properties the model is compiled with. AUTO's own properties go by name, so that this
+// builds with OpenVINO versions that do not declare them, and the ones that the AUTO device in
+// use does not support are left out with a warning.
+static ov::AnyMap compileProperties(ov::Core& core, const std::string& device)
+{
+    ov::AnyMap properties;
+    const std::string cacheDir = utils::getConfigurationParameterString(ENV_CACHE_DIR, "");
+    if (!cacheDir.empty())
+        properties.emplace(ov::cache_dir(cacheDir));
+    if (device != "AUTO")
+        return properties;
+
+    // the candidates in order of priority; naming them turns off AUTO's default exclusions
+    // (the NPU and non-Intel GPUs)
+    const std::string devices = withoutSpaces(utils::getConfigurationParameterString(ENV_AUTO_DEVICES, ""));
+    if (!devices.empty())
+        properties.emplace(ov::device::priorities(devices));
+
+    struct AutoSetting { const char* env; const char* property; ov::Any value; };
+    std::vector<AutoSetting> settings;
+    const std::string thresholds = utils::getConfigurationParameterString(ENV_AUTO_UTILIZATION, "");
+    if (!thresholds.empty())
+        settings.push_back({ENV_AUTO_UTILIZATION, "DEVICES_UTILIZATION_THRESHOLD",
+                            parseUtilizationThresholds(thresholds)});
+    const std::string curves = utils::getConfigurationParameterString(ENV_AUTO_PERF_CURVES, "");
+    if (!curves.empty())
+        settings.push_back({ENV_AUTO_PERF_CURVES, "PERF_CURVE_TABLE", readPerfCurves(curves)});
+    const std::string lowPower = withoutSpaces(utils::getConfigurationParameterString(ENV_AUTO_LOW_POWER_DEVICE, ""));
+    if (!lowPower.empty())
+        settings.push_back({ENV_AUTO_LOW_POWER_DEVICE, "LOW_POWER_DEVICE", lowPower});
+    if (utils::getConfigurationParameterBool(ENV_AUTO_COMPILE_FOR_ALL, false))
+    {
+        // AUTO stores the models compiled for the other candidates there
+        if (cacheDir.empty())
+        {
+            CV_LOG_WARNING(NULL, "DNN/OpenVINO: " << ENV_AUTO_COMPILE_FOR_ALL << " needs " << ENV_CACHE_DIR
+                                 << ", so it is ignored");
+        }
+        else
+        {
+            settings.push_back({ENV_AUTO_COMPILE_FOR_ALL, "COMPILE_FOR_ALL", true});
+        }
+    }
+    // with OPENCV_LOG_LEVEL=DEBUG, AUTO prints its own log too, which shows every device switch
+    if (cv::utils::logging::getLogLevel() >= cv::utils::logging::LOG_LEVEL_DEBUG)
+        settings.push_back({"OPENCV_LOG_LEVEL", ov::log::level.name(), ov::log::Level::INFO});
+    if (settings.empty())
+        return properties;
+
+    std::vector<ov::PropertyName> supported;
+    try
+    {
+        supported = core.get_property("AUTO", ov::supported_properties);
+    }
+    catch (const std::exception& e)
+    {
+        CV_LOG_WARNING(NULL, "DNN/OpenVINO: can't list the properties of AUTO: " << e.what());
+    }
+    for (const AutoSetting& s : settings)
+    {
+        const bool isSupported = std::any_of(supported.begin(), supported.end(),
+                                             [&](const std::string& name) { return name == s.property; });
+        if (isSupported)
+            properties.emplace(s.property, s.value);
+        else
+            CV_LOG_WARNING(NULL, "DNN/OpenVINO: AUTO in this OpenVINO version does not support " << s.property
+                                 << ", so " << s.env << " is ignored");
+    }
+    return properties;
+}
+
 void Net::Impl::finalizeOpenVINO()
 {
     CV_Assert(ov_engine);
@@ -228,9 +388,18 @@ void Net::Impl::finalizeOpenVINO()
     // AUTO unless setPreferableTarget() fixed a device. No precision hint either: the device
     // runs at OpenVINO's default inference precision.
     const std::string device = eng.device;
+    ov::Core& core = getCore(device);
+    const ov::AnyMap properties = compileProperties(core, device);  // a bad setting throws here
+    if (!properties.empty())
+    {
+        std::string names;
+        for (const auto& p : properties)
+            names += (names.empty() ? "" : ", ") + p.first;
+        CV_LOG_INFO(NULL, "DNN/OpenVINO: compiling for " << device << " with " << names);
+    }
     try
     {
-        eng.compiledModel = getCore(device).compile_model(eng.model, device);
+        eng.compiledModel = core.compile_model(eng.model, device, properties);
         eng.request = eng.compiledModel.create_infer_request();
     }
     catch (const std::exception& e)
@@ -240,8 +409,8 @@ void Net::Impl::finalizeOpenVINO()
                                     e.what()));
     }
     eng.compiled = true;
-    CV_LOG_INFO(NULL, "DNN/OpenVINO: compiled the model for " << device << ", running on "
-                      << executionDevices(eng.compiledModel));
+    eng.runningOn = executionDevices(eng.compiledModel);
+    CV_LOG_INFO(NULL, "DNN/OpenVINO: compiled the model for " << device << ", running on " << eng.runningOn);
 }
 
 void Net::Impl::setOpenVINOInput(const Mat& blob, const std::string& name)
@@ -359,6 +528,18 @@ void Net::Impl::forwardOpenVINO(OutputArrayOfArrays outBlobs, const std::vector<
     // getPerfProfile() reports the whole model as one entry
     layersTimings.assign(2, 0);
     layersTimings[1] = getTickCount() - start;
+
+    // AUTO starts on the CPU while the GPU compiles and moves later: log the move. Only when
+    // the INFO level is on, so the device query costs nothing otherwise.
+    if (eng.device == "AUTO" && cv::utils::logging::getLogLevel() >= cv::utils::logging::LOG_LEVEL_INFO)
+    {
+        const std::string devices = executionDevices(eng.compiledModel);
+        if (devices != eng.runningOn)
+        {
+            CV_LOG_INFO(NULL, "DNN/OpenVINO: AUTO now runs on " << devices);
+            eng.runningOn = devices;
+        }
+    }
 
     std::vector<Mat> outs;
     outs.reserve(outIdxs.size());
