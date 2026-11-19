@@ -304,6 +304,14 @@ void Net::Impl::setPreferableBackend(Net& net, int backendId)
     if (preferableBackend == backendId)
         return;
 
+#ifdef OPENCV_DNN_OPENVINO
+    if (ov_engine)
+    {
+        preferableBackend = backendId;  // the whole model runs in OpenVINO whatever the backend
+        return;
+    }
+#endif
+
 #ifdef HAVE_ONNXRUNTIME
     if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
     {
@@ -360,6 +368,14 @@ void Net::Impl::setPreferableBackend(Net& net, int backendId)
 
 void Net::Impl::setPreferableTarget(int targetId)
 {
+#ifdef OPENCV_DNN_OPENVINO
+    if (ov_engine)
+    {
+        setOpenVINOTarget(targetId);
+        return;
+    }
+#endif
+
 #ifdef HAVE_ONNXRUNTIME
     if (useOrtEngine && mainGraph && modelFormat == DNN_MODEL_ONNX && !modelFileName.empty())
     {
