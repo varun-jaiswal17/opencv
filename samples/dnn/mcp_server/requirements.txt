@@ -1,0 +1,7 @@
+# cv2 comes from an OpenCV 5.x build with WITH_OPENVINO=ON, see README.md
+fastmcp>=4.2
+numpy
+pyyaml
+scipy          # insid3
+docling-core   # docRead: DocTags to Markdown
+pytest         # tests/
