@@ -1,0 +1,91 @@
+# Models served by the OpenCV MCP server (server.py).
+#
+# A file or folder name is looked up as given, then in OPENCV_DOWNLOAD_CACHE_DIR, as the other
+# samples in samples/dnn do. README.md says where to get each model.
+#
+# Keys used for every model:
+#   about       one line that list_models shows to the AI app
+#   task        the tool that uses the model: docRead, detect or segment
+#   adapter     the file in adapters/ that runs it
+#   engine      ENGINE_OPENCV or ENGINE_OPENVINO
+#   target      DNN_TARGET_CPU, DNN_TARGET_OPENCL, DNN_TARGET_OPENCL_FP16 or DNN_TARGET_NPU
+#   model       the ONNX file, or the export folder for the vlm module
+#   test_inputs what validate.py passes to the model besides the image
+# The other keys are read by the model's adapter.
+
+granite:
+  about: "Granite-Docling 258M: reads a whole page (text, tables, lists) into Markdown"
+  task: docRead
+  adapter: granite_docling
+  engine: ENGINE_OPENCV        # cv2.vlm needs a KV cache, which ENGINE_OPENVINO doesn't have yet
+  target: DNN_TARGET_CPU
+  model: "granite-docling-258M"
+  max_new_tokens: 4096
+
+paddleocr_vl:
+  about: "PaddleOCR-VL 0.9B: text, or a table, formula or chart with the matching prompt"
+  task: docRead
+  adapter: paddleocr_vl
+  engine: ENGINE_OPENCV        # same reason as granite
+  target: DNN_TARGET_CPU
+  model: "paddleocr-vl"
+  max_new_tokens: 4096
+
+yoloe26:
+  about: "YOLOE-26s: fast, finds the 80 COCO classes it was exported with"
+  task: detect
+  adapter: yoloe26
+  engine: ENGINE_OPENVINO
+  target: DNN_TARGET_CPU
+  model: "yoloe26/yoloe-26s-seg-nms.onnx"
+  labels: "labels/yoloe26.txt"
+  mean: 0.0
+  scale: 0.00392
+  width: 640
+  height: 640
+  rgb: true
+  score_threshold: 0.3
+  nms_threshold: 0.7
+  test_inputs: {}
+
+owlv2:
+  about: "OWLv2 base: finds any objects named in free text, slower than yoloe26"
+  task: detect
+  adapter: owlv2
+  engine: ENGINE_OPENVINO
+  target: DNN_TARGET_CPU
+  model: "owlv2/owlv2-base-patch16.onnx"
+  tokenizer: "owlv2/tokenizer.json"
+  width: 960
+  text_length: 16
+  score_threshold: 0.1
+  nms_threshold: 0.3
+  test_inputs: {classes: ["person", "car", "traffic light"]}
+
+sam3:
+  about: "SAM 3: cuts out every object that matches a short text prompt, such as 'dog'"
+  task: segment
+  adapter: sam3
+  engine: ENGINE_OPENVINO
+  target: DNN_TARGET_CPU
+  model: "sam3/sam3_image_encoder.onnx"
+  language_model: "sam3/sam3_language_encoder.onnx"
+  decoder_model: "sam3/sam3_decoder.onnx"
+  tokenizer: "sam3/tokenizer.json"
+  text_length: 32
+  max_boxes: 16
+  score_threshold: 0.5
+  test_inputs: {prompt: "person"}
+
+insid3:
+  about: "INSID3: cuts out the object marked in an example image (reference_image + reference_mask)"
+  task: segment
+  adapter: insid3
+  engine: ENGINE_OPENVINO
+  target: DNN_TARGET_CPU
+  model: "insid3/dinov3_vits16.onnx"
+  width: 768
+  svd_components: 192
+  tau: 0.6
+  merge_threshold: 0.2
+  test_inputs: {reference_image: "reference/person.jpg", reference_mask: "reference/person_mask.png"}
