@@ -164,9 +164,11 @@ private:
     bool setupReadingAt(CMTime position);
     cv::Mat retrieveFramePixelBuffer();
     int getPreferredOrientationDegrees() const;
+    bool isInEmptyEdit(CMTime time) const;
 
     CMTime mFrameTimestamp;
     size_t mFrameNum;
+    std::vector<CMTimeRange> mEmptyEdits;
 
     int started;
 };
@@ -709,6 +711,14 @@ CvCaptureFile::CvCaptureFile(const char* filename) {
 
     mAssetTrack = [tracks[0] retain];
 
+    // Empty edits in the track's edit list (e.g. a leading gap) have no video data,
+    // but AVAssetReader still returns a black frame for them.
+    for (AVAssetTrackSegment *segment in mAssetTrack.segments) {
+        if (segment.empty) {
+            mEmptyEdits.push_back(segment.timeMapping.target);
+        }
+    }
+
     if ( ! setupReadingAt(kCMTimeZero) ) {
         fprintf(stderr, "OpenCV: Couldn't read movie file \"%s\"\n", filename);
         [localpool drain];
@@ -806,6 +816,12 @@ bool CvCaptureFile::grabFrame() {
         CFRelease(mCurrentSampleBuffer);
     }
     mCurrentSampleBuffer = [mTrackOutput copyNextSampleBuffer];
+    // Skip the black frames generated for empty edits, as FFmpeg does
+    while ( mCurrentSampleBuffer &&
+            isInEmptyEdit(CMSampleBufferGetOutputPresentationTimeStamp(mCurrentSampleBuffer)) ) {
+        CFRelease(mCurrentSampleBuffer);
+        mCurrentSampleBuffer = [mTrackOutput copyNextSampleBuffer];
+    }
     mGrabbedPixels = CMSampleBufferGetImageBuffer(mCurrentSampleBuffer);
     CVBufferRetain(mGrabbedPixels);
     mFrameTimestamp = CMSampleBufferGetOutputPresentationTimeStamp(mCurrentSampleBuffer);
@@ -974,6 +990,15 @@ int CvCaptureFile::getPreferredOrientationDegrees() const {
     CGAffineTransform transform = mAssetTrack.preferredTransform;
     double radians = atan2(transform.b, transform.a);
     return static_cast<int>(round(radians * 180 / M_PI));
+}
+
+bool CvCaptureFile::isInEmptyEdit(CMTime time) const {
+    for (const CMTimeRange& range : mEmptyEdits) {
+        if (CMTimeRangeContainsTime(range, time)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool CvCaptureFile::retrieveFrame_(int, cv::OutputArray arr) {
