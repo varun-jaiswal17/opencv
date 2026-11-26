@@ -46,6 +46,8 @@ using std::string;
 
 typedef std::unordered_map<std::string, int64_t> NamesHash;
 
+struct OpenVINOEngine;  // defined in net_impl_openvino_engine.cpp
+
 #ifdef HAVE_ONNXRUNTIME
 struct OrtNamesCache;
 
@@ -356,6 +358,24 @@ struct Net::Impl : public detail::NetImplBase
     mutable std::vector<std::tuple<String, String, double>> ort_profile_data;  // (name, type, ms_per_run)
 #endif
 
+    // ENGINE_OPENVINO: set only for a model read with that engine, which then runs whole in
+    // OpenVINO. Declared whatever OPENCV_DNN_OPENVINO says: the OpenVINO DNN plugin is compiled with
+    // it while opencv_dnn may not be, and both must agree on the layout of Net::Impl.
+    std::shared_ptr<OpenVINOEngine> ov_engine;
+#ifdef OPENCV_DNN_OPENVINO
+    // Without a target the model is compiled for OpenVINO's AUTO device. A target fixes the
+    // device instead: DNN_TARGET_CPU, _OPENCL, _OPENCL_FP16 and _NPU map to the OpenVINO CPU, GPU
+    // and NPU devices. Other targets, and devices that are not available, fall back to the CPU
+    // with a warning. A new device is compiled for on the next forward().
+    void setOpenVINOTarget(int targetId);
+    // compiles the model on first use, for AUTO or the device fixed by setOpenVINOTarget()
+    void finalizeOpenVINO();
+    void setOpenVINOInput(const Mat& blob, const std::string& name);
+    // Runs the model and hands copies of the named outputs to outBlobs, or of all outputs in
+    // model order if outNames is empty. An empty name selects the first output.
+    void forwardOpenVINO(OutputArrayOfArrays outBlobs, const std::vector<std::string>& outNames);
+#endif
+
     void allocateLayer(int lid, const LayersShapesMap& layersShapes);
 
     // TODO add getter
@@ -608,6 +628,9 @@ Net readNetFromONNX2(const char*, size_t);
 Net readNetFromONNX2(const std::vector<uchar>&);
 #ifdef HAVE_ONNXRUNTIME
 Net readNetFromONNX2_ORT(const String& onnxFile);
+#endif
+#ifdef OPENCV_DNN_OPENVINO
+Net readNetFromONNX2_OpenVINO(const String& onnxFile);
 #endif
 
 CV__DNN_INLINE_NS_END
